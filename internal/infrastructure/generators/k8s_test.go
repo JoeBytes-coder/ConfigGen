@@ -11,11 +11,11 @@ func TestK8sGenerator_Generate(t *testing.T) {
 
 	t.Run("no resource types returns error", func(t *testing.T) {
 		req := domain.ConfigRequest{
-			AppName:      "test",
-			Image:        "nginx",
-			Tag:          "latest",
-			Port:         80,
-			K8sResource:  []string{},
+			AppName:     "test",
+			Image:       "nginx",
+			Tag:         "latest",
+			Port:        80,
+			K8sResource: []string{},
 		}
 		_, err := g.Generate(req)
 		if err == nil {

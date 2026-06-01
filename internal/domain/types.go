@@ -8,12 +8,12 @@ import "time"
 //   [K8s]  Replicas, K8sResource
 //   [Dockerfile] DockerfileBaseImage, DockerfileWorkDir, DockerfileCmd
 type ConfigRequest struct {
-	Type       string            `json:"type" binding:"required,oneof=compose k8s dockerfile kustomize" validate:"required,oneof=compose k8s dockerfile kustomize"`
-	AppName    string            `json:"app_name" binding:"required" validate:"required,min=1,max=50"`
-	Image      string            `json:"image" binding:"required" validate:"required,min=1,max=100"`
-	Tag        string            `json:"tag" binding:"required" validate:"required,min=1,max=50"`
-	Port       int               `json:"port" binding:"required,min=1,max=65535" validate:"min=0,max=65535"`
-	Env        map[string]string `json:"env" validate:"omitempty"`
+	Type    string            `json:"type" binding:"required,oneof=compose k8s dockerfile kustomize" validate:"required,oneof=compose k8s dockerfile kustomize"`
+	AppName string            `json:"app_name" binding:"required" validate:"required,min=1,max=50"`
+	Image   string            `json:"image" binding:"required" validate:"required,min=1,max=100"`
+	Tag     string            `json:"tag" binding:"required" validate:"required,min=1,max=50"`
+	Port    int               `json:"port" binding:"required,min=1,max=65535" validate:"min=0,max=65535"`
+	Env     map[string]string `json:"env" validate:"omitempty"`
 
 	Replicas    int      `json:"replicas" validate:"omitempty,min=1,max=100"`
 	K8sResource []string `json:"k8s_resource" validate:"omitempty,dive,oneof=Deployment Service ConfigMap Namespace Ingress StatefulSet PersistentVolumeClaim Secret DaemonSet CronJob ServiceAccount HorizontalPodAutoscaler ResourceQuota LimitRange NetworkPolicy Role RoleBinding ClusterRole ClusterRoleBinding StorageClass"`

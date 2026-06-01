@@ -57,11 +57,11 @@ func TestDockerfileGenerator_Generate(t *testing.T) {
 
 	t.Run("custom command", func(t *testing.T) {
 		req := domain.ConfigRequest{
-			AppName:         "server",
-			Image:           "golang",
-			Tag:             "1.21",
-			Port:            9090,
-			DockerfileCmd:   []string{"/bin/server", "--port", "9090"},
+			AppName:       "server",
+			Image:         "golang",
+			Tag:           "1.21",
+			Port:          9090,
+			DockerfileCmd: []string{"/bin/server", "--port", "9090"},
 		}
 		result, err := g.Generate(req)
 		if err != nil {
