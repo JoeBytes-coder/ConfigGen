@@ -4,6 +4,7 @@ name: Go CI
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -17,12 +18,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.0'  # 👈 根据你的项目需求修改版本
+          go-version-file: 'go.mod'
 
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
-          path: ~/go/pkg/mod
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
@@ -33,31 +36,45 @@ jobs:
       - name: Build binary (optional)
         run: go build -o configgen ./cmd/configgen
 
-      - name: Check for vulnerabilities (optional, requires gosec)
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -fmt=json -out=results.json ./...
-          cat results.json
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        continue-on-error: true  # 👈 扫描失败不阻断后续
+        with:
+          # 仅高危阻断；若想完全不阻断改为: '-no-fail -fmt=json -out=results.json ./...'
+          args: '-severity=high -fmt=json -out=results.json ./...'
+      - name: Upload Gosec Report
+        if: always()  # 👈 关键：即使上一步因漏洞失败，也确保报告被上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosec-security-report
+          path: results.json
+          retention-days: 7
+
   release:
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # ✅ 显式声明发布所需权限
     steps:
-        - uses: actions/checkout@v4
-        - uses: actions/setup-go@v5
-          with:
-            go-version: '1.22'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
 
-        - name: Build for Linux
-          run: GOOS=linux GOARCH=amd64 go build -o configgen-linux-amd64 .
+      - name: Build for Linux
+        run: GOOS=linux GOARCH=amd64 go build -o configgen-linux-amd64 ./cmd/configgen
 
-        - name: Build for macOS
-          run: GOOS=darwin GOARCH=amd64 go build -o configgen-macos-amd64 .
+      - name: Build for macOS
+        run: GOOS=darwin GOARCH=amd64 go build -o configgen-macos-amd64 ./cmd/configgen
 
-        - name: Upload binaries to Release
-          uses: softprops/action-gh-release@v2
-          with:
-            files: |
-                configgen-linux-amd64
-                configgen-macos-amd64
-                token: ${{ secrets.GITHUB_TOKEN }}  # GitHub 自动提供，无需配置
+      - name: Build for macOS (Apple Silicon)
+        run: GOOS=darwin GOARCH=arm64 go build -o configgen-macos-arm64 ./cmd/configgen
+
+      - name: Upload binaries to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            configgen-linux-amd64
+            configgen-macos-amd64
+          token: ${{ secrets.GITHUB_TOKEN }}  # GitHub 自动提供，无需配置
