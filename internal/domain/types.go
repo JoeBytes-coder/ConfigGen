@@ -4,9 +4,10 @@ import "time"
 
 // ConfigRequest 配置请求结构体
 // 字段按生成类型分组：
-//   [通用] Type, AppName, Image, Tag, Port, Env
-//   [K8s]  Replicas, K8sResource
-//   [Dockerfile] DockerfileBaseImage, DockerfileWorkDir, DockerfileCmd
+//
+//	[通用] Type, AppName, Image, Tag, Port, Env
+//	[K8s]  Replicas, K8sResource
+//	[Dockerfile] DockerfileBaseImage, DockerfileWorkDir, DockerfileCmd
 type ConfigRequest struct {
 	Type    string            `json:"type" binding:"required,oneof=compose k8s dockerfile kustomize" validate:"required,oneof=compose k8s dockerfile kustomize"`
 	AppName string            `json:"app_name" binding:"required" validate:"required,min=1,max=50"`
