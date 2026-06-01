@@ -31,7 +31,7 @@ jobs:
         run: go test -v ./...
 
       - name: Build binary (optional)
-        run: go build -o configgen .
+        run: go build -o configgen ./cmd/configgen
 
       - name: Check for vulnerabilities (optional, requires gosec)
         run: |
