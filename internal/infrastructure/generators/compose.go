@@ -10,6 +10,10 @@ import (
 	"configgen/internal/infrastructure/generators/templates"
 )
 
+func init() {
+	Register("compose", &ComposeGenerator{})
+}
+
 type ComposeGenerator struct{}
 
 type ComposeTemplateData struct {

@@ -24,10 +24,27 @@ type ConfigRequest struct {
 	DockerfileCmd       []string `json:"dockerfile_cmd" validate:"omitempty,dive,min=1,max=100"`
 }
 
+// ResourceNode 表示生成的单个资源
+type ResourceNode struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// ResourceEdge 表示两个资源之间的关联关系
+type ResourceEdge struct {
+	SourceKind string `json:"source_kind"`
+	SourceName string `json:"source_name"`
+	TargetKind string `json:"target_kind"`
+	TargetName string `json:"target_name"`
+	Relation   string `json:"relation"`
+}
+
 // ConfigResult 配置结果结构体
 type ConfigResult struct {
-	Type   string `json:"type"`
-	Config string `json:"config"`
+	Type      string         `json:"type"`
+	Config    string         `json:"config"`
+	Resources []ResourceNode `json:"resources,omitempty"`
+	Edges     []ResourceEdge `json:"edges,omitempty"`
 }
 
 // ConfigRecord 配置记录结构体

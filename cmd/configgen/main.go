@@ -23,14 +23,18 @@ func main() {
 	flag.StringVar(&addr, "addr", ":8080", "server address")
 	flag.Parse()
 
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              "http://ff49b9a174c1474f9f7dd0de8f019afc@172.16.60.190:29000/3",
-		TracesSampleRate: 0.01,
-	})
-	if err != nil {
-		log.Fatalf("sentry.Init: %s", err)
+	sentryDSN := os.Getenv("SENTRY_DSN")
+	if sentryDSN != "" {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              sentryDSN,
+			TracesSampleRate: 0.01,
+		})
+		if err != nil {
+			log.Fatalf("sentry.Init: %s", err)
+		}
+		defer sentry.Flush(2 * time.Second)
+		log.Println("Sentry initialized")
 	}
-	defer sentry.Flush(2 * time.Second)
 
 	dataSource := os.Getenv("CONFIGGEN_DB")
 	if dataSource == "" {

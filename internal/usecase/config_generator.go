@@ -65,8 +65,6 @@ func (cg *ConfigGenerator) applyDefaults(req *domain.ConfigRequest) {
 		case "Service", "Ingress":
 			needsImage = true
 			needsPort = true
-		default:
-			needsPort = true
 		}
 	}
 

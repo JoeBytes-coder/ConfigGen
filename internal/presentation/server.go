@@ -9,7 +9,6 @@ import (
 	"strconv"
 
 	"configgen/internal/domain"
-	"configgen/internal/usecase"
 	"configgen/web"
 
 	"github.com/gin-gonic/gin"
@@ -32,13 +31,21 @@ func init() {
 	}
 }
 
+// ConfigGeneratorUseCase is the interface the server depends on.
+type ConfigGeneratorUseCase interface {
+	Prepare(req *domain.ConfigRequest)
+	GenerateAndSave(req domain.ConfigRequest) (domain.ConfigRecord, error)
+	GetRecord(id int64) (domain.ConfigRecord, error)
+	ListRecords(offset, limit int) ([]domain.ConfigRecord, error)
+}
+
 type Server struct {
 	router    *gin.Engine
-	configGen *usecase.ConfigGenerator
+	configGen ConfigGeneratorUseCase
 	srv       *http.Server
 }
 
-func NewServer(configGen *usecase.ConfigGenerator) *Server {
+func NewServer(configGen ConfigGeneratorUseCase) *Server {
 	if gin.Mode() == gin.ReleaseMode {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -55,6 +62,9 @@ func NewServer(configGen *usecase.ConfigGenerator) *Server {
 	g.POST("/api/v1/generate", s.generate)
 	g.GET("/api/v1/configs", s.listConfigs)
 	g.GET("/api/v1/configs/:id", s.getConfig)
+	g.GET("/api/v1/configs/:id/resources", s.getConfigResources)
+	g.GET("/api/v1/configs/:id/edges", s.getConfigEdges)
+	g.GET("/api/v1/configs/:id/graph", s.getConfigGraph)
 
 	return s
 }
@@ -268,6 +278,84 @@ func (s *Server) getConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, rec)
+}
+
+func (s *Server) getConfigResources(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
+		return
+	}
+
+	rec, err := s.configGen.GetRecord(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		log.WithError(err).Error("Failed to get config record")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
+		return
+	}
+
+	if rec.Result.Resources == nil {
+		rec.Result.Resources = []domain.ResourceNode{}
+	}
+	c.JSON(http.StatusOK, rec.Result.Resources)
+}
+
+func (s *Server) getConfigEdges(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
+		return
+	}
+
+	rec, err := s.configGen.GetRecord(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		log.WithError(err).Error("Failed to get config record")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
+		return
+	}
+
+	if rec.Result.Edges == nil {
+		rec.Result.Edges = []domain.ResourceEdge{}
+	}
+	c.JSON(http.StatusOK, rec.Result.Edges)
+}
+
+func (s *Server) getConfigGraph(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
+		return
+	}
+
+	rec, err := s.configGen.GetRecord(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		log.WithError(err).Error("Failed to get config record")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
+		return
+	}
+
+	if rec.Result.Resources == nil {
+		rec.Result.Resources = []domain.ResourceNode{}
+	}
+	if rec.Result.Edges == nil {
+		rec.Result.Edges = []domain.ResourceEdge{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"resources": rec.Result.Resources,
+		"edges":     rec.Result.Edges,
+	})
 }
 
 func (s *Server) listConfigs(c *gin.Context) {

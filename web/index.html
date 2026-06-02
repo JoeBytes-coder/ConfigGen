@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ConfigGen</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUaI9Ai9QUjggB4hNnAf1D1BwHbP9vFyW3n4dXZ9OKK8h6F8RzTvd1T8h0Bh0" crossorigin="anonymous">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/dist/vis-network.min.css" rel="stylesheet">
   <style>
     .result-area { margin-top: 1rem; }
     .env-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
@@ -30,6 +31,7 @@
                   <option value="dockerfile">Dockerfile</option>
                   <option value="compose">Docker Compose</option>
                   <option value="k8s">Kubernetes Manifest</option>
+                  <option value="kustomize">Kustomize</option>
                 </select>
               </div>
 
@@ -71,6 +73,9 @@
               <!-- Kubernetes 参数 -->
               <div id="k8sFields" style="display: none;"></div>
 
+              <!-- Kustomize 参数（复用的 K8s 字段） -->
+              <div id="kustomizeFields" style="display: none;"></div>
+
               <!-- Dockerfile 参数 -->
               <div id="dockerfileFields" style="display: none;"></div>
 
@@ -89,12 +94,27 @@
               </div>
               <textarea id="output" class="form-control" readonly rows="15"></textarea>
             </div>
+
+            <!-- 资源关系图（仅 K8s/Kustomize） -->
+            <div id="graphSection" class="mt-3" style="display: none;">
+              <h5>资源关系图
+                <button class="btn btn-outline-info btn-sm ms-2" type="button" data-bs-toggle="collapse" data-bs-target="#graphCollapse" aria-expanded="false">
+                  展开/收起
+                </button>
+              </h5>
+              <div class="collapse" id="graphCollapse">
+                <div class="card card-body p-2">
+                  <div id="graphContainer" style="height: 400px; border: 1px solid #dee2e6; border-radius: 4px;"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.6/dist/vis-network.min.js"></script>
   <script>
     const form = document.getElementById('configForm');
     const typeSelect = document.getElementById('typeSelect');
@@ -105,6 +125,10 @@
     const messageDiv = document.getElementById('message');
     const envContainer = document.getElementById('envContainer');
     const addEnvBtn = document.getElementById('addEnvBtn');
+    const graphSection = document.getElementById('graphSection');
+    const graphContainer = document.getElementById('graphContainer');
+    let lastConfigId = null;
+    let graphInstance = null;
 
     function resetResultState() {
       messageDiv.textContent = '';
@@ -151,9 +175,10 @@
 
     async function loadFieldFragments() {
       try {
-        const [composeResponse, k8sResponse, dockerfileResponse] = await Promise.all([
+        const [composeResponse, k8sResponse, kustomizeResponse, dockerfileResponse] = await Promise.all([
           fetch('/web/views/compose.html'),
           fetch('/web/views/kubernetes.html'),
+          fetch('/web/views/kustomize.html'),
           fetch('/web/views/dockerfile.html')
         ]);
 
@@ -162,6 +187,9 @@
         }
         if (k8sResponse.ok) {
           document.getElementById('k8sFields').innerHTML = await k8sResponse.text();
+        }
+        if (kustomizeResponse.ok) {
+          document.getElementById('kustomizeFields').innerHTML = await kustomizeResponse.text();
         }
         if (dockerfileResponse.ok) {
           document.getElementById('dockerfileFields').innerHTML = await dockerfileResponse.text();
@@ -173,11 +201,21 @@
 
     document.addEventListener('DOMContentLoaded', loadFieldFragments);
 
+    function hideGraph() {
+      graphSection.style.display = 'none';
+      if (graphInstance) {
+        graphInstance.destroy();
+        graphInstance = null;
+      }
+    }
+
     typeSelect.addEventListener('change', function() {
       const selectedType = this.value;
       document.getElementById('composeFields').style.display = selectedType === 'compose' ? 'block' : 'none';
       document.getElementById('k8sFields').style.display = selectedType === 'k8s' ? 'block' : 'none';
+      document.getElementById('kustomizeFields').style.display = selectedType === 'kustomize' ? 'block' : 'none';
       document.getElementById('dockerfileFields').style.display = selectedType === 'dockerfile' ? 'block' : 'none';
+      hideGraph();
       resetResultState();
     });
 
@@ -207,7 +245,7 @@
           env: collectEnvVars(),
         };
 
-        if (formData.get('type') === 'k8s') {
+        if (formData.get('type') === 'k8s' || formData.get('type') === 'kustomize') {
           payload.k8s_resource = k8sSelectedOptions;
           const hasWorkload = k8sSelectedOptions.some(opt => ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob'].includes(opt));
           if (hasWorkload) {
@@ -237,6 +275,12 @@
           copyBtn.disabled = false;
           downloadBtn.disabled = false;
           showMessage('配置生成成功！', true);
+          lastConfigId = result.id;
+          if (payload.type === 'k8s' || payload.type === 'kustomize') {
+            loadGraph(lastConfigId);
+          } else {
+            hideGraph();
+          }
         } else {
           const errMessage = result?.error || 'Unknown error';
           showMessage('错误: ' + errMessage, false);
@@ -255,6 +299,74 @@
       }
     });
 
+    async function loadGraph(configId) {
+      try {
+        const res = await fetch(`/api/v1/configs/${configId}/graph`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.resources || data.resources.length === 0) return;
+
+        const nodes = data.resources.map((r, i) => ({
+          id: i + 1,
+          label: r.kind + '\n' + r.name,
+          title: r.kind + ': ' + r.name,
+          shape: 'box',
+          color: {
+            background: getNodeColor(r.kind),
+            border: '#2B7CE9'
+          },
+          font: { multi: true }
+        }));
+
+        const kindToNodeId = {};
+        nodes.forEach((n, i) => {
+          const kind = data.resources[i].kind;
+          kindToNodeId[kind] = n.id;
+        });
+
+        const edges = (data.edges || []).map(e => ({
+          from: kindToNodeId[e.source_kind],
+          to: kindToNodeId[e.target_kind],
+          label: e.relation,
+          arrows: 'to',
+          font: { align: 'middle' },
+          color: { color: '#848484' }
+        })).filter(e => e.from && e.to);
+
+        graphSection.style.display = 'block';
+        const collapseEl = document.getElementById('graphCollapse');
+        const bsCollapse = new bootstrap.Collapse(collapseEl, { toggle: false });
+        bsCollapse.show();
+
+        if (graphInstance) graphInstance.destroy();
+
+        const container = graphContainer;
+        const visData = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+        const options = {
+          layout: { hierarchical: { direction: 'LR', sortMethod: 'directed' } },
+          physics: { enabled: false },
+          edges: { smooth: { type: 'curvedCW', roundness: 0.2 } }
+        };
+        graphInstance = new vis.Network(container, visData, options);
+      } catch (e) {
+        console.error('Failed to load graph:', e);
+      }
+    }
+
+    function getNodeColor(kind) {
+      const colors = {
+        'Namespace': '#E8F5E9', 'Deployment': '#BBDEFB', 'StatefulSet': '#BBDEFB',
+        'DaemonSet': '#BBDEFB', 'CronJob': '#BBDEFB', 'Service': '#C8E6C9',
+        'Ingress': '#FFF9C4', 'ConfigMap': '#FFE0B2', 'Secret': '#FFCDD2',
+        'PersistentVolumeClaim': '#D1C4E9', 'StorageClass': '#D1C4E9',
+        'ServiceAccount': '#B2EBF2', 'HorizontalPodAutoscaler': '#F0F4C3',
+        'ResourceQuota': '#F8BBD0', 'LimitRange': '#F8BBD0',
+        'NetworkPolicy': '#B2DFDB', 'Role': '#CE93D8', 'RoleBinding': '#CE93D8',
+        'ClusterRole': '#CE93D8', 'ClusterRoleBinding': '#CE93D8'
+      };
+      return colors[kind] || '#E0E0E0';
+    }
+
     copyBtn.addEventListener('click', function() {
       navigator.clipboard.writeText(output.value).then(() => {
         const originalText = copyBtn.textContent;
@@ -266,7 +378,8 @@
     downloadBtn.addEventListener('click', function() {
       const mimeType = typeSelect.value === 'dockerfile' ? 'text/plain' : 'application/x-yaml';
       const blob = new Blob([output.value], { type: mimeType });
-      let filename = typeSelect.value === 'dockerfile' ? 'Dockerfile' : `config-${typeSelect.value}.yaml`;
+      const typeMap = { dockerfile: 'Dockerfile', compose: 'docker-compose.yaml', k8s: 'kubernetes.yaml', kustomize: 'kustomize.yaml' };
+      let filename = typeMap[typeSelect.value] || `config-${typeSelect.value}.yaml`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

@@ -51,14 +51,25 @@ There is no runtime template hot-reload.
 
 ## Generators
 
-Three supported types: `compose`, `k8s`, `dockerfile`.
+Four supported types: `compose`, `k8s`, `dockerfile`, `kustomize`.
 
 Adding a new generator type:
 1. Implement `Generator` interface from `internal/infrastructure/generators/interface.go`
-2. Register in `registry.go` map
+2. Call `Register("type_name", &MyGenerator{})` — preferably in an `init()` function
 3. Add templates under `internal/infrastructure/generators/templates/<type>/`
 
 The K8s generator supports **20 resource kinds** (Deployment, Service, ConfigMap, Secret, …). Each kind has its own `.yaml.tmpl` file. The template cache uses sync.RWMutex with double-check locking — two goroutines do not parse the same template twice.
+
+## K8s Resource Relationships
+
+When generating K8s or Kustomize configs, `ExtractK8sRelationships()` derives `ResourceNode` and `ResourceEdge` lists from the requested resource types. These are stored inline in `ConfigResult.Resources` and `ConfigResult.Edges`.
+
+API endpoints for relationships:
+- `GET /api/v1/configs/:id/resources` — list of resource nodes
+- `GET /api/v1/configs/:id/edges` — list of edges
+- `GET /api/v1/configs/:id/graph` — combined `{resources, edges}` for visualization
+
+Relationship rules are defined in `k8s.go:ExtractK8sRelationships()` covering Service→Deployment, Ingress→Service, Deployment→ConfigMap, RBAC bindings, etc.
 
 ## Env var ordering
 
@@ -66,15 +77,15 @@ Compose and Dockerfile generators sort env keys alphabetically before rendering.
 
 ## DESIGN.md caveat
 
-`DESIGN.md` lists Nginx, Docker Daemon, Containerd, ZIP packaging, template hot-reload, plugin system, and i18n as planned features. **None are implemented.** Only compose / k8s / dockerfile work.
+`DESIGN.md` lists Nginx, Docker Daemon, Containerd, ZIP packaging, template hot-reload, plugin system, and i18n as planned features. **None are implemented.** Only compose / k8s / dockerfile / kustomize work.
 
 ## Test coverage
 
-Only two packages have tests:
+Four packages have tests:
 - `internal/infrastructure/generators/` — 89.5%
 - `internal/infrastructure/storage/` — 74.5%
-
-`internal/usecase/` and `internal/presentation/` have zero tests.
+- `internal/usecase/` — new (mock-based)
+- `internal/presentation/` — new (interface + httptest)
 
 ## Previous bugs fixed (do not reintroduce)
 
@@ -84,6 +95,7 @@ Only two packages have tests:
 4. Template cache TOCTOU → double-check inside write lock
 5. Env map iteration non-deterministic → sorted keys
 6. No graceful shutdown → signal handler with 5s timeout
+7. `applyDefaults` `default` case incorrectly set `needsPort=true` for all resource types → removed the default case, only Service/Ingress set `needsPort`
 
 ## SQLite
 

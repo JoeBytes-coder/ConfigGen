@@ -10,6 +10,10 @@ import (
 	"configgen/internal/infrastructure/generators/templates"
 )
 
+func init() {
+	Register("dockerfile", &DockerfileGenerator{})
+}
+
 type DockerfileGenerator struct{}
 
 type DockerfileTemplateData struct {

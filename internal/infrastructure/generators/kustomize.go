@@ -12,6 +12,10 @@ import (
 	"configgen/internal/infrastructure/generators/templates"
 )
 
+func init() {
+	Register("kustomize", &KustomizeGenerator{})
+}
+
 type KustomizeGenerator struct{}
 
 type KustomizeTemplateData struct {

@@ -1,0 +1,95 @@
+<p class="text-muted small">Kustomize 配置复用 Kubernetes 资源定义，自动生成 kustomization.yaml 及各资源文件。</p>
+<div class="mb-3">
+  <label class="form-label">副本数</label>
+  <input name="replicas" type="number" class="form-control" value="1" min="1" max="100">
+</div>
+<hr class="my-3">
+<div class="mb-3">
+  <label class="form-label">Kubernetes 资源类型（可多选）</label>
+  <div class="row">
+    <div class="col-md-6">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Namespace" id="kustomize-namespace">
+        <label class="form-check-label" for="kustomize-namespace">Namespace</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Deployment" id="kustomize-deployment">
+        <label class="form-check-label" for="kustomize-deployment">Deployment</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="StatefulSet" id="kustomize-statefulset">
+        <label class="form-check-label" for="kustomize-statefulset">StatefulSet</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="DaemonSet" id="kustomize-daemonset">
+        <label class="form-check-label" for="kustomize-daemonset">DaemonSet</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Service" id="kustomize-service">
+        <label class="form-check-label" for="kustomize-service">Service</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Ingress" id="kustomize-ingress">
+        <label class="form-check-label" for="kustomize-ingress">Ingress</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="ConfigMap" id="kustomize-configmap">
+        <label class="form-check-label" for="kustomize-configmap">ConfigMap</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Secret" id="kustomize-secret">
+        <label class="form-check-label" for="kustomize-secret">Secret</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="PersistentVolumeClaim" id="kustomize-pvc">
+        <label class="form-check-label" for="kustomize-pvc">PersistentVolumeClaim</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="StorageClass" id="kustomize-storageclass">
+        <label class="form-check-label" for="kustomize-storageclass">StorageClass</label>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="CronJob" id="kustomize-cronjob">
+        <label class="form-check-label" for="kustomize-cronjob">CronJob</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="ServiceAccount" id="kustomize-serviceaccount">
+        <label class="form-check-label" for="kustomize-serviceaccount">ServiceAccount</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="HorizontalPodAutoscaler" id="kustomize-hpa">
+        <label class="form-check-label" for="kustomize-hpa">HorizontalPodAutoscaler</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="ResourceQuota" id="kustomize-resourcequota">
+        <label class="form-check-label" for="kustomize-resourcequota">ResourceQuota</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="LimitRange" id="kustomize-limitrange">
+        <label class="form-check-label" for="kustomize-limitrange">LimitRange</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="NetworkPolicy" id="kustomize-networkpolicy">
+        <label class="form-check-label" for="kustomize-networkpolicy">NetworkPolicy</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="Role" id="kustomize-role">
+        <label class="form-check-label" for="kustomize-role">Role</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="RoleBinding" id="kustomize-rolebinding">
+        <label class="form-check-label" for="kustomize-rolebinding">RoleBinding</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="ClusterRole" id="kustomize-clusterrole">
+        <label class="form-check-label" for="kustomize-clusterrole">ClusterRole</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="k8s_resource[]" value="ClusterRoleBinding" id="kustomize-clusterrolebinding">
+        <label class="form-check-label" for="kustomize-clusterrolebinding">ClusterRoleBinding</label>
+      </div>
+    </div>
+  </div>
+</div>
