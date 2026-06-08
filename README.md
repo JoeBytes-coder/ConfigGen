@@ -18,6 +18,7 @@ ConfigGen 是一个基于 Go 语言开发的云原生配置生成工具，提供
 ```
 configgen/
 ├── cmd/configgen/          # 应用程序入口
+├── config/                 # 运行时配置加载 helpers
 ├── internal/
 │   ├── domain/             # 领域层：实体和接口
 │   │   ├── types.go        # 核心数据结构
@@ -25,22 +26,21 @@ configgen/
 │   ├── usecase/            # 用例层：业务逻辑
 │   │   └── config_generator.go
 │   ├── infrastructure/     # 基础设施层：外部实现
-│   │   ├── generators/     # 配置生成器实现
-│   │   ├── storage/        # 数据存储实现
-│   │   └── config_generator.go
+│   │   ├── generators/     # 配置生成器实现与模板
+│   │   │   └── templates/   # 嵌入式生成模板
+│   │   └── storage/        # 数据存储实现
 │   └── presentation/       # 表示层：HTTP 处理器
 │       ├── server.go
 │       └── util.go
-├── templates/              # 模板文件
-│   ├── compose/            # Docker Compose 模板
-│   └── k8s/                # Kubernetes 模板
-├── web/                    # 前端页面
-│   ├── index.html          # 默认页面  
-│   └── views/                
-├── DESIGN.md               # 设计文档
+├── web/                    # 前端页面和嵌入式静态资源
+├── .env.example            # 示例环境变量文件
+├── AGENTS.md
+├── README.md
 ├── go.mod
-└── README.md
+└── LICENSE
 ```
+
+`db/` 是运行时 SQLite 数据目录，通常由 `.gitignore` 忽略。
 
 ### 架构说明
 
@@ -211,7 +211,7 @@ CMD ["./configgen"]
 
 ### Kubernetes 部署
 
-参考 `templates/k8s/` 中的示例配置。
+参考 `internal/infrastructure/generators/templates/k8s/` 中的示例配置。
 
 ## 贡献
 

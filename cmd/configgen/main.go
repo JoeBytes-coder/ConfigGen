@@ -12,6 +12,7 @@ import (
 
 	"github.com/getsentry/sentry-go"
 
+	"configgen/config"
 	"configgen/internal/infrastructure/generators"
 	"configgen/internal/infrastructure/storage"
 	"configgen/internal/presentation"
@@ -20,8 +21,11 @@ import (
 
 func main() {
 	var addr string
-	flag.StringVar(&addr, "addr", ":8080", "server address")
+	flag.StringVar(&addr, "addr", "", "server address")
 	flag.Parse()
+
+	_ = config.LoadDotEnv(".env")
+	listenAddr := config.GetListenAddr(addr)
 
 	sentryDSN := os.Getenv("SENTRY_DSN")
 	if sentryDSN != "" {
@@ -53,7 +57,7 @@ func main() {
 
 	// Run server in goroutine
 	go func() {
-		if err := srv.Run(addr); err != nil && err != http.ErrServerClosed {
+		if err := srv.Run(listenAddr); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server exited: %v", err)
 		}
 	}()

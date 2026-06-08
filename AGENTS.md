@@ -1,5 +1,13 @@
 # ConfigGen — AGENTS.md
 
+## Agent guidance
+
+- This repo is a Go HTTP service with Clean Architecture. Work is centered in `cmd/configgen/`, `internal/usecase/`, `internal/infrastructure/`, and `internal/presentation/`.
+- Prefer the existing `README.md` for usage, API examples, and development commands. Do not duplicate large docs from the README.
+- Runtime configuration is loaded from a root `.env` file if present, plus environment variables.
+- Supported runtime env vars: `PORT`, `ADDR`, `CONFIGGEN_DB`, `SENTRY_DSN`.
+- Use `go fmt ./...`, `go vet ./...`, and `go test ./...` for code changes.
+
 ## Quick start
 
 ```powershell
