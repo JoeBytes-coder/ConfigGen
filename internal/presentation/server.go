@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"configgen/internal/domain"
 	"configgen/web"
@@ -23,7 +25,6 @@ var (
 
 func init() {
 	log.SetFormatter(&logrus.JSONFormatter{})
-	log.SetOutput(logrus.StandardLogger().Out)
 	if gin.Mode() == gin.ReleaseMode {
 		log.SetLevel(logrus.InfoLevel)
 	} else {
@@ -46,16 +47,13 @@ type Server struct {
 }
 
 func NewServer(configGen ConfigGeneratorUseCase) *Server {
-	if gin.Mode() == gin.ReleaseMode {
-		gin.SetMode(gin.ReleaseMode)
-	}
 	g := gin.Default()
 
 	s := &Server{router: g, configGen: configGen}
 
 	g.GET("/", s.home)
 	g.GET("/health", s.health)
-	g.GET("/web/views/:name", s.serveView)
+	g.NoRoute(s.spaFallback)
 	g.POST("/api/v1/generate/compose", s.generateCompose)
 	g.POST("/api/v1/generate/k8s", s.generateK8s)
 	g.POST("/api/v1/generate/:type", s.generateWithType)
@@ -85,8 +83,22 @@ func (s *Server) health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+// distFS is the embedded Vue SPA build output (web/dist).
+var distFS = func() fs.FS {
+	sub, err := fs.Sub(web.FS, "dist")
+	if err != nil {
+		panic("web: embedded dist directory missing: " + err.Error())
+	}
+	return sub
+}()
+
 func (s *Server) home(c *gin.Context) {
-	data, err := web.FS.ReadFile("index.html")
+	s.serveIndex(c)
+}
+
+// serveIndex serves the SPA entry document.
+func (s *Server) serveIndex(c *gin.Context) {
+	data, err := web.FS.ReadFile("dist/index.html")
 	if err != nil {
 		c.String(http.StatusOK, "ConfigGen 已启动，API: /api/v1/generate, /api/v1/configs/:id")
 		return
@@ -94,14 +106,24 @@ func (s *Server) home(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
-func (s *Server) serveView(c *gin.Context) {
-	name := c.Param("name")
-	data, err := web.FS.ReadFile("views/" + name)
-	if err != nil {
-		c.Status(http.StatusNotFound)
+// spaFallback serves built frontend assets from the embedded dist directory
+// and falls back to index.html for client-side routes (Vue Router history mode).
+// API paths that matched no route get a JSON 404 instead of the SPA document.
+func (s *Server) spaFallback(c *gin.Context) {
+	if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+
+	name := strings.TrimPrefix(c.Request.URL.Path, "/")
+	if name != "" && fs.ValidPath(name) {
+		if f, err := distFS.Open(name); err == nil {
+			f.Close()
+			c.FileFromFS(name, http.FS(distFS))
+			return
+		}
+	}
+	s.serveIndex(c)
 }
 
 func parseConfigRequest(raw []byte) (domain.ConfigRequest, error) {
@@ -191,18 +213,8 @@ func (s *Server) generateWithType(c *gin.Context) {
 }
 
 func (s *Server) generate(c *gin.Context) {
-	var req domain.ConfigRequest
-	rawBody, err := c.GetRawData()
-	if err != nil {
-		log.WithError(err).Warn("Failed to read request body")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
-		return
-	}
-
-	req, err = parseConfigRequest(rawBody)
-	if err != nil {
-		log.WithError(err).Warn("Failed to parse request JSON")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format", "details": err.Error()})
+	req, ok := parseGenerateBody(c)
+	if !ok {
 		return
 	}
 
@@ -214,24 +226,34 @@ func (s *Server) generate(c *gin.Context) {
 }
 
 func (s *Server) generateWithTypeInternal(c *gin.Context, configType string) {
-	var req domain.ConfigRequest
-	rawBody, err := c.GetRawData()
-	if err != nil {
-		log.WithError(err).Warn("Failed to read request body")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
-		return
-	}
-
-	req, err = parseConfigRequest(rawBody)
-	if err != nil {
-		log.WithError(err).Warn("Failed to parse request JSON")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format", "details": err.Error()})
+	req, ok := parseGenerateBody(c)
+	if !ok {
 		return
 	}
 
 	req.Type = configType
 
 	s.processGenerateRequest(c, req)
+}
+
+// parseGenerateBody reads and parses the JSON request body,
+// writing a 400 response and returning false on failure.
+func parseGenerateBody(c *gin.Context) (domain.ConfigRequest, bool) {
+	rawBody, err := c.GetRawData()
+	if err != nil {
+		log.WithError(err).Warn("Failed to read request body")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return domain.ConfigRequest{}, false
+	}
+
+	req, err := parseConfigRequest(rawBody)
+	if err != nil {
+		log.WithError(err).Warn("Failed to parse request JSON")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format", "details": err.Error()})
+		return domain.ConfigRequest{}, false
+	}
+
+	return req, true
 }
 
 func (s *Server) processGenerateRequest(c *gin.Context, req domain.ConfigRequest) {

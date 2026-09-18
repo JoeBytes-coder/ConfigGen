@@ -4,7 +4,7 @@
 
 - This repo is a Go HTTP service with Clean Architecture. Work is centered in `cmd/configgen/`, `internal/usecase/`, `internal/infrastructure/`, and `internal/presentation/`.
 - Prefer the existing `README.md` for usage, API examples, and development commands. Do not duplicate large docs from the README.
-- Runtime configuration is loaded from a root `.env` file if present, plus environment variables.
+- Runtime configuration is loaded from a root `.env` file if present, plus environment variables. `.env` is gitignored; `.env.example` is the template.
 - Supported runtime env vars: `PORT`, `ADDR`, `CONFIGGEN_DB`, `SENTRY_DSN`.
 - Use `go fmt ./...`, `go vet ./...`, and `go test ./...` for code changes.
 
@@ -26,6 +26,8 @@ Verify: `curl http://localhost:8080/health` → `{"status":"ok"}`
 | Test one package | `go test ./internal/infrastructure/generators/` |
 | Static analysis | `go vet ./...` |
 | Coverage | `go test -cover ./...` |
+| Frontend dev | `cd web && npm run dev` (Vite :5173, proxies `/api` to :8080) |
+| Frontend build | `cd web && npm install && npm run build` (output in `web/dist`, embedded via go:embed) |
 
 No formatter or linter config beyond `go fmt` / `go vet`.
 
@@ -35,10 +37,11 @@ Clean Architecture, four layers:
 
 ```
 cmd/configgen/main.go          — DI assembly: store → generator → usecase → server
+config/                        — runtime config: .env loading, listen-addr resolution
 internal/domain/               — entities (ConfigRequest, ConfigResult, ConfigRecord) + Store interface
 internal/usecase/              — business logic: applyDefaults, GenerateAndSave, GetRecord, ListRecords
 internal/infrastructure/       — concrete implementations (generators, SQLite store)
-internal/presentation/         — Gin HTTP handlers + request parsing
+internal/presentation/         — Gin HTTP handlers + request parsing + SPA static/fallback serving
 ```
 
 Dependency direction: `presentation → usecase → domain ← infrastructure`
@@ -47,14 +50,16 @@ Dependency direction: `presentation → usecase → domain ← infrastructure`
 
 All templates live under `internal/infrastructure/generators/templates/` and are loaded via `//go:embed`. The old root `templates/` directory was deleted.
 
-Same for frontend assets — `web/` is embedded via `web/embed.go`.
+Same for frontend assets — the Vue SPA build output in `web/dist/` is embedded via `web/embed.go` (`//go:embed all:dist`). `web/dist` is committed so Go-only builds work; rebuild it with `cd web && npm install && npm run build`. Frontend source lives in `web/src` (Vue 3 + Vite + TypeScript + Pinia + Naive UI + Vue Router, primary color #7DAEE1). Dev mode: `cd web && npm run dev` serves Vite on :5173 and proxies `/api` to the Go backend on :8080. `web/node_modules` is gitignored.
 
 There is no runtime template hot-reload.
 
 ## Key model quirks
 
-- `Port` has `validate:"min=0,max=65535"` (not `required`). Default is applied by `usecase.applyDefaults()`. Validation runs AFTER `Prepare()`.
+- `Port` has `validate:"min=0,max=65535"` (not `required`). Default is applied by `usecase.applyDefaults()` via `Prepare()`. Validation runs AFTER `Prepare()`.
 - `ConfigRequest` fields are grouped by type (common / k8s / dockerfile) in struct comments at `internal/domain/types.go`.
+- `binding:` tags were removed from `ConfigRequest` — handlers validate manually with `validator.Struct()`, Gin's `ShouldBindJSON` is never used. Do not re-add them.
+- `GenerateAndSave` does NOT apply defaults. Callers must call `Prepare()` first (presentation does, before validation).
 - `K8sEnable` was removed — do not add it back.
 
 ## Generators
@@ -83,9 +88,9 @@ Relationship rules are defined in `k8s.go:ExtractK8sRelationships()` covering Se
 
 Compose and Dockerfile generators sort env keys alphabetically before rendering. Output is deterministic, not map-iteration-order dependent.
 
-## DESIGN.md caveat
+## Not implemented (do not claim support)
 
-`DESIGN.md` lists Nginx, Docker Daemon, Containerd, ZIP packaging, template hot-reload, plugin system, and i18n as planned features. **None are implemented.** Only compose / k8s / dockerfile / kustomize work.
+The original design doc (since deleted) listed these as planned: Nginx config, Docker Daemon config, Containerd config, ZIP packaging, template hot-reload, an external plugin system, and i18n. **None are implemented.** Only compose / k8s / dockerfile / kustomize work. The "plugin architecture" in commit history is the in-process registry (`Register()` + `init()`), not external plugins. The current design doc lives at `docs/DESIGN.md` (system + frontend design).
 
 ## Test coverage
 
@@ -104,6 +109,7 @@ Four packages have tests:
 5. Env map iteration non-deterministic → sorted keys
 6. No graceful shutdown → signal handler with 5s timeout
 7. `applyDefaults` `default` case incorrectly set `needsPort=true` for all resource types → removed the default case, only Service/Ingress set `needsPort`
+8. `GenerateAndSave` re-applied defaults after the handler's `Prepare()` → removed the duplicate call; `Prepare()` is now the single place defaults are applied
 
 ## SQLite
 

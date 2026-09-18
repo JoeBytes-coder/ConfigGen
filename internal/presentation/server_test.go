@@ -354,3 +354,45 @@ func TestGraphEndpoints(t *testing.T) {
 		}
 	})
 }
+
+func TestSPARouting(t *testing.T) {
+	s := NewServer(&mockConfigGenerator{})
+
+	t.Run("root serves the SPA index", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/", nil)
+		s.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d", w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("expected text/html, got %s", ct)
+		}
+	})
+
+	t.Run("client-side route falls back to index", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/history", nil)
+		s.router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("expected text/html, got %s", ct)
+		}
+	})
+
+	t.Run("unknown api path returns json 404", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/api/v1/nope", nil)
+		s.router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+		}
+		var body map[string]string
+		json.Unmarshal(w.Body.Bytes(), &body)
+		if body["error"] != "not found" {
+			t.Errorf("expected error 'not found', got %v", body)
+		}
+	})
+}
