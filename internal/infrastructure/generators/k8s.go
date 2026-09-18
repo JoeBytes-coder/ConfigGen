@@ -152,10 +152,6 @@ func ExtractK8sRelationships(req domain.ConfigRequest) ([]domain.ResourceNode, [
 		return nil, nil
 	}
 	appName := req.AppName
-	resourceSet := make(map[string]bool)
-	for _, r := range req.K8sResource {
-		resourceSet[r] = true
-	}
 
 	var nodes []domain.ResourceNode
 	for _, kind := range req.K8sResource {
@@ -178,22 +174,21 @@ func ExtractK8sRelationships(req domain.ConfigRequest) ([]domain.ResourceNode, [
 		source   string
 		target   string
 		relation string
-		optional string // if set, only emit when this kind is also present
 	}
 
 	rules := []edgeRule{
-		{source: "Deployment", target: "ConfigMap", relation: "mounts", optional: "ConfigMap"},
-		{source: "Deployment", target: "Secret", relation: "mounts", optional: "Secret"},
-		{source: "Deployment", target: "ServiceAccount", relation: "uses-sa", optional: "ServiceAccount"},
-		{source: "Deployment", target: "Service", relation: "exposed-by", optional: "Service"},
-		{source: "Ingress", target: "Service", relation: "routes-to", optional: "Service"},
-		{source: "Service", target: "Deployment", relation: "selects", optional: "Deployment"},
-		{source: "StatefulSet", target: "Service", relation: "governed-by", optional: "Service"},
-		{source: "HorizontalPodAutoscaler", target: "Deployment", relation: "scales", optional: "Deployment"},
-		{source: "RoleBinding", target: "Role", relation: "binds", optional: "Role"},
-		{source: "RoleBinding", target: "ServiceAccount", relation: "grants-to", optional: "ServiceAccount"},
-		{source: "ClusterRoleBinding", target: "ClusterRole", relation: "binds", optional: "ClusterRole"},
-		{source: "ClusterRoleBinding", target: "ServiceAccount", relation: "grants-to", optional: "ServiceAccount"},
+		{source: "Deployment", target: "ConfigMap", relation: "mounts"},
+		{source: "Deployment", target: "Secret", relation: "mounts"},
+		{source: "Deployment", target: "ServiceAccount", relation: "uses-sa"},
+		{source: "Deployment", target: "Service", relation: "exposed-by"},
+		{source: "Ingress", target: "Service", relation: "routes-to"},
+		{source: "Service", target: "Deployment", relation: "selects"},
+		{source: "StatefulSet", target: "Service", relation: "governed-by"},
+		{source: "HorizontalPodAutoscaler", target: "Deployment", relation: "scales"},
+		{source: "RoleBinding", target: "Role", relation: "binds"},
+		{source: "RoleBinding", target: "ServiceAccount", relation: "grants-to"},
+		{source: "ClusterRoleBinding", target: "ClusterRole", relation: "binds"},
+		{source: "ClusterRoleBinding", target: "ServiceAccount", relation: "grants-to"},
 	}
 
 	for _, rule := range rules {
@@ -201,11 +196,6 @@ func ExtractK8sRelationships(req domain.ConfigRequest) ([]domain.ResourceNode, [
 		tgtName, tgtOK := kindName[rule.target]
 		if !srcOK || !tgtOK {
 			continue
-		}
-		if rule.optional != "" {
-			if !resourceSet[rule.optional] {
-				continue
-			}
 		}
 		edges = append(edges, domain.ResourceEdge{
 			SourceKind: rule.source,

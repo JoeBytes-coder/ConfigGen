@@ -19,9 +19,9 @@ func (cg *ConfigGenerator) Prepare(req *domain.ConfigRequest) {
 	cg.applyDefaults(req)
 }
 
+// GenerateAndSave assumes Prepare was called first, so defaults are applied
+// before validation. It does not re-apply defaults.
 func (cg *ConfigGenerator) GenerateAndSave(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-	cg.applyDefaults(&req)
-
 	result, err := cg.generator.Generate(req)
 	if err != nil {
 		return domain.ConfigRecord{}, err

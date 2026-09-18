@@ -27,16 +27,6 @@ func GetGenerator(genType string) (Generator, error) {
 	return gen, nil
 }
 
-func RegisteredTypes() []string {
-	generatorsMu.RLock()
-	defer generatorsMu.RUnlock()
-	types := make([]string, 0, len(generators))
-	for t := range generators {
-		types = append(types, t)
-	}
-	return types
-}
-
 func GenerateConfig(req domain.ConfigRequest) (domain.ConfigResult, error) {
 	gen, err := GetGenerator(req.Type)
 	if err != nil {

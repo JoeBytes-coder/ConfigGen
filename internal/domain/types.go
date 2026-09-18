@@ -9,11 +9,11 @@ import "time"
 //	[K8s]  Replicas, K8sResource
 //	[Dockerfile] DockerfileBaseImage, DockerfileWorkDir, DockerfileCmd
 type ConfigRequest struct {
-	Type    string            `json:"type" binding:"required,oneof=compose k8s dockerfile kustomize" validate:"required,oneof=compose k8s dockerfile kustomize"`
-	AppName string            `json:"app_name" binding:"required" validate:"required,min=1,max=50"`
-	Image   string            `json:"image" binding:"required" validate:"required,min=1,max=100"`
-	Tag     string            `json:"tag" binding:"required" validate:"required,min=1,max=50"`
-	Port    int               `json:"port" binding:"required,min=1,max=65535" validate:"min=0,max=65535"`
+	Type    string            `json:"type" validate:"required,oneof=compose k8s dockerfile kustomize"`
+	AppName string            `json:"app_name" validate:"required,min=1,max=50"`
+	Image   string            `json:"image" validate:"required,min=1,max=100"`
+	Tag     string            `json:"tag" validate:"required,min=1,max=50"`
+	Port    int               `json:"port" validate:"min=0,max=65535"`
 	Env     map[string]string `json:"env" validate:"omitempty"`
 
 	Replicas    int      `json:"replicas" validate:"omitempty,min=1,max=100"`

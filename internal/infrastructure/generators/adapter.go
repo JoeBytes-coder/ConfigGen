@@ -22,7 +22,3 @@ func (a *Adapter) Generate(req domain.ConfigRequest) (domain.ConfigResult, error
 
 	return result, nil
 }
-
-func (a *Adapter) RegisteredTypes() []string {
-	return RegisteredTypes()
-}
