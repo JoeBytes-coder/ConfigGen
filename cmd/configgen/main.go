@@ -3,17 +3,14 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/getsentry/sentry-go"
-
 	"configgen/config"
-	"configgen/internal/infrastructure/generators"
 	"configgen/internal/infrastructure/storage"
 	"configgen/internal/presentation"
 	"configgen/internal/usecase"
@@ -24,57 +21,50 @@ func main() {
 	flag.StringVar(&addr, "addr", "", "server address")
 	flag.Parse()
 
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	_ = config.LoadDotEnv(".env")
 	listenAddr := config.GetListenAddr(addr)
 
-	sentryDSN := os.Getenv("SENTRY_DSN")
-	if sentryDSN != "" {
-		err := sentry.Init(sentry.ClientOptions{
-			Dsn:              sentryDSN,
-			TracesSampleRate: 0.01,
-		})
-		if err != nil {
-			log.Fatalf("sentry.Init: %s", err)
-		}
-		defer sentry.Flush(2 * time.Second)
-		log.Println("Sentry initialized")
+	dsn := os.Getenv("CONFIGGEN_DB")
+	if dsn == "" {
+		dsn = "db/configgen.db"
 	}
-
-	dataSource := os.Getenv("CONFIGGEN_DB")
-	if dataSource == "" {
-		dataSource = "db/configgen.db"
-	}
-
-	store, err := storage.NewSQLiteStore(dataSource)
+	store, err := storage.NewSQLiteStore(dsn)
 	if err != nil {
-		log.Fatalf("failed to create store: %v", err)
+		slog.Error("failed to create store", "error", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
-	configGen := usecase.NewConfigGenerator(generators.NewAdapter(), store)
+	server := presentation.NewServer(usecase.NewGeneratorService(store))
+	httpServer := &http.Server{
+		Addr:              listenAddr,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	srv := presentation.NewServer(configGen)
-
-	// Run server in goroutine
 	go func() {
-		if err := srv.Run(listenAddr); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server exited: %v", err)
+		slog.Info("server listening", "addr", listenAddr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server exited", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
-
-	// Graceful shutdown with 5s timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	slog.Info("shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("server forced to shutdown: %v", err)
+	if err := httpServer.Shutdown(ctx); err != nil {
+		slog.Error("forced shutdown", "error", err)
+		os.Exit(1)
 	}
-
-	log.Println("Server exited")
+	slog.Info("server stopped")
 }

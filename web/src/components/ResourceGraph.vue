@@ -3,68 +3,70 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { DataSet } from 'vis-data'
 import { Network } from 'vis-network'
 
-import type { ResourceEdge, ResourceNode } from '@/api/types'
-import { KIND_COLORS } from '@/constants/k8s'
+import type { PlanEdge, PlanNode } from '@/api/types'
+import { CATEGORY_COLORS } from '@/constants/k8s'
+import { useMetaStore } from '@/stores/meta'
 
-const props = withDefaults(
-  defineProps<{
-    nodes: ResourceNode[]
-    edges: ResourceEdge[]
-    height?: number
-  }>(),
-  { height: 420 },
-)
+const props = defineProps<{ nodes: PlanNode[]; edges: PlanEdge[] }>()
+const container = ref<HTMLDivElement | null>(null)
+const meta = useMetaStore()
 
-const container = ref<HTMLElement | null>(null)
 let network: Network | null = null
 
-function render() {
-  if (!container.value || props.nodes.length === 0) return
-
-  const kindToId = new Map<string, number>()
-  const visNodes = props.nodes.map((n, i) => {
-    kindToId.set(n.kind, i + 1)
-    return {
-      id: i + 1,
-      label: `${n.kind}\n${n.name}`,
-      title: `${n.kind}: ${n.name}`,
-      shape: 'box',
-      color: {
-        background: KIND_COLORS[n.kind] ?? '#E8EEF6',
-        border: '#6E9CD3',
-        highlight: { background: KIND_COLORS[n.kind] ?? '#E8EEF6', border: '#7DAEE1' },
-      },
-      font: { multi: true, size: 13 },
-      margin: 8,
-    }
-  })
-
-  const visEdges = props.edges
-    .map((e) => ({
-      from: kindToId.get(e.source_kind),
-      to: kindToId.get(e.target_kind),
-      label: e.relation,
-      arrows: 'to',
-      font: { align: 'middle', size: 11, color: '#6B7F9C' },
-      color: { color: '#93A9C4', highlight: '#7DAEE1' },
-    }))
-    .filter((e) => e.from !== undefined && e.to !== undefined)
-
-  network?.destroy()
-  network = new Network(
-    container.value,
-    { nodes: new DataSet(visNodes), edges: new DataSet(visEdges) },
-    {
-      layout: { hierarchical: { direction: 'LR', sortMethod: 'directed', levelSeparation: 110 } },
-      physics: { enabled: false },
-      interaction: { hover: true },
-      edges: { smooth: { type: 'curvedCW', roundness: 0.2 } },
-    },
+function buildData() {
+  const present = new Set(props.nodes.map((node) => node.kind))
+  const nodes = new DataSet(
+    props.nodes.map((node) => {
+      const category = meta.kindToMeta.get(node.kind)?.category
+      return {
+        id: node.kind,
+        label: node.kind + '\n' + node.name,
+        shape: 'box',
+        margin: 10,
+        color: {
+          background: CATEGORY_COLORS[category ?? ''] ?? '#E7F0FA',
+          border: node.auto_added ? '#D99A4E' : '#6E9CD3',
+          highlight: { background: '#DCEAF8', border: '#3D6EA8' },
+        },
+        font: { color: '#2C3E5D', size: 12, face: 'Inter, sans-serif' },
+        title: node.auto_added ? '自动补充的资源' : node.name,
+      }
+    }),
   )
+  const edges = new DataSet(
+    props.edges
+      .filter((edge) => present.has(edge.from) && present.has(edge.to))
+      .map((edge, index) => ({
+        id: index,
+        from: edge.from,
+        to: edge.to,
+        label: edge.relation,
+        arrows: 'to',
+        color: { color: '#A8BCD5' },
+        font: { size: 10, color: '#8296B3', align: 'middle' },
+        smooth: { enabled: true, type: 'dynamic' },
+      })),
+  )
+  return { nodes, edges }
 }
 
-watch(() => [props.nodes, props.edges], render)
+function render() {
+  if (!container.value) return
+  const data = buildData()
+  if (network) {
+    network.setData(data)
+    return
+  }
+  network = new Network(container.value, data, {
+    height: '280px',
+    physics: { stabilization: true, barnesHut: { gravitationalConstant: -6000, springLength: 140 } },
+    interaction: { hover: true, dragNodes: true },
+    layout: { improvedLayout: true },
+  })
+}
+
 onMounted(render)
+watch(() => [props.nodes, props.edges], render, { deep: true })
 onBeforeUnmount(() => {
   network?.destroy()
   network = null
@@ -72,9 +74,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    ref="container"
-    class="graph-container"
-    :style="{ height: `${height}px` }"
-  />
+  <div ref="container" class="graph-container"></div>
 </template>
+
+<style scoped>
+.graph-container {
+  width: 100%;
+  height: 280px;
+  background: #fbfdff;
+  border: 1px solid var(--cg-border);
+  border-radius: 8px;
+}
+</style>

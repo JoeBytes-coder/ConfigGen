@@ -1,89 +1,36 @@
 package presentation
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"configgen/internal/domain"
 	"configgen/web"
-
-	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
-	"github.com/sirupsen/logrus"
 )
 
-var (
-	log      = logrus.New()
-	validate = validator.New()
-)
-
-func init() {
-	log.SetFormatter(&logrus.JSONFormatter{})
-	if gin.Mode() == gin.ReleaseMode {
-		log.SetLevel(logrus.InfoLevel)
-	} else {
-		log.SetLevel(logrus.DebugLevel)
-	}
-}
-
-// ConfigGeneratorUseCase is the interface the server depends on.
-type ConfigGeneratorUseCase interface {
-	Prepare(req *domain.ConfigRequest)
-	GenerateAndSave(req domain.ConfigRequest) (domain.ConfigRecord, error)
-	GetRecord(id int64) (domain.ConfigRecord, error)
-	ListRecords(offset, limit int) ([]domain.ConfigRecord, error)
+// UseCase 是 presentation 依赖的用例接口（定义在消费方）。
+type UseCase interface {
+	Plan(sel domain.Selection) (domain.Plan, error)
+	Render(sel domain.Selection) (domain.Record, error)
+	GetRecord(id int64) (domain.Record, error)
+	ListRecords(offset, limit int) ([]domain.RecordSummary, int, error)
+	Health() error
 }
 
 type Server struct {
-	router    *gin.Engine
-	configGen ConfigGeneratorUseCase
-	srv       *http.Server
+	router *gin.Engine
+	uc     UseCase
 }
 
-func NewServer(configGen ConfigGeneratorUseCase) *Server {
-	g := gin.Default()
-
-	s := &Server{router: g, configGen: configGen}
-
-	g.GET("/", s.home)
-	g.GET("/health", s.health)
-	g.NoRoute(s.spaFallback)
-	g.POST("/api/v1/generate/compose", s.generateCompose)
-	g.POST("/api/v1/generate/k8s", s.generateK8s)
-	g.POST("/api/v1/generate/:type", s.generateWithType)
-	g.POST("/api/v1/generate", s.generate)
-	g.GET("/api/v1/configs", s.listConfigs)
-	g.GET("/api/v1/configs/:id", s.getConfig)
-	g.GET("/api/v1/configs/:id/resources", s.getConfigResources)
-	g.GET("/api/v1/configs/:id/edges", s.getConfigEdges)
-	g.GET("/api/v1/configs/:id/graph", s.getConfigGraph)
-
-	return s
-}
-
-func (s *Server) Run(addr string) error {
-	s.srv = &http.Server{Addr: addr, Handler: s.router}
-	return s.srv.ListenAndServe()
-}
-
-func (s *Server) Shutdown(ctx context.Context) error {
-	if s.srv != nil {
-		return s.srv.Shutdown(ctx)
-	}
-	return nil
-}
-
-func (s *Server) health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// distFS is the embedded Vue SPA build output (web/dist).
 var distFS = func() fs.FS {
 	sub, err := fs.Sub(web.FS, "dist")
 	if err != nil {
@@ -92,29 +39,159 @@ var distFS = func() fs.FS {
 	return sub
 }()
 
-func (s *Server) home(c *gin.Context) {
-	s.serveIndex(c)
+func NewServer(uc UseCase) *Server {
+	router := gin.New()
+	router.Use(gin.Recovery(), requestLogger())
+	s := &Server{router: router, uc: uc}
+
+	router.GET("/health", s.health)
+	router.GET("/api/v1/catalog", s.catalog)
+	router.POST("/api/v1/plan", s.plan)
+	router.POST("/api/v1/render", s.render)
+	router.GET("/api/v1/records", s.listRecords)
+	router.GET("/api/v1/records/:id", s.getRecord)
+	router.GET("/", s.index)
+	router.NoRoute(s.spaFallback)
+	return s
 }
 
-// serveIndex serves the SPA entry document.
+func (s *Server) Handler() http.Handler { return s.router }
+
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		slog.Info("http_request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
+}
+
+func (s *Server) health(c *gin.Context) {
+	if err := s.uc.Health(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "error": "database unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (s *Server) catalog(c *gin.Context) {
+	c.JSON(http.StatusOK, domain.CatalogView())
+}
+
+func decodeSelection(c *gin.Context) (domain.Selection, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	var sel domain.Selection
+	if err := decoder.Decode(&sel); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体解析失败", "details": err.Error()})
+		return domain.Selection{}, false
+	}
+	return sel, true
+}
+
+func (s *Server) plan(c *gin.Context) {
+	sel, ok := decodeSelection(c)
+	if !ok {
+		return
+	}
+	plan, err := s.uc.Plan(sel)
+	if err != nil {
+		writeError(c, plan, err)
+		return
+	}
+	c.JSON(http.StatusOK, plan)
+}
+
+func (s *Server) render(c *gin.Context) {
+	sel, ok := decodeSelection(c)
+	if !ok {
+		return
+	}
+	rec, err := s.uc.Render(sel)
+	if err != nil {
+		writeError(c, rec.Plan, err)
+		return
+	}
+	c.JSON(http.StatusCreated, rec)
+}
+
+func writeError(c *gin.Context, plan domain.Plan, err error) {
+	var appErr *domain.AppError
+	if errors.As(err, &appErr) {
+		status := http.StatusBadRequest
+		if appErr.Kind == domain.ErrUnprocessable {
+			status = http.StatusUnprocessableEntity
+		}
+		payload := gin.H{"error": appErr.Message, "diagnostics": appErr.Diagnostics}
+		if len(plan.Nodes) > 0 {
+			payload["plan"] = plan
+		}
+		c.JSON(status, payload)
+		return
+	}
+	slog.Error("request failed", "error", err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "内部错误"})
+}
+
+func (s *Server) listRecords(c *gin.Context) {
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "offset 必须是非负整数"})
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	records, total, err := s.uc.ListRecords(offset, limit)
+	if err != nil {
+		slog.Error("list records failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询历史记录失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"records": records, "total": total, "offset": offset, "limit": limit})
+}
+
+func (s *Server) getRecord(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id 必须是整数"})
+		return
+	}
+	rec, err := s.uc.GetRecord(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		slog.Error("get record failed", "error", err, "id", id)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询记录失败"})
+		return
+	}
+	c.JSON(http.StatusOK, rec)
+}
+
+func (s *Server) index(c *gin.Context) { s.serveIndex(c) }
+
 func (s *Server) serveIndex(c *gin.Context) {
 	data, err := web.FS.ReadFile("dist/index.html")
 	if err != nil {
-		c.String(http.StatusOK, "ConfigGen 已启动，API: /api/v1/generate, /api/v1/configs/:id")
+		c.String(http.StatusOK, "ConfigGen 已启动，API: /api/v1/catalog")
 		return
 	}
 	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
-// spaFallback serves built frontend assets from the embedded dist directory
-// and falls back to index.html for client-side routes (Vue Router history mode).
-// API paths that matched no route get a JSON 404 instead of the SPA document.
 func (s *Server) spaFallback(c *gin.Context) {
 	if strings.HasPrefix(c.Request.URL.Path, "/api/") {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-
 	name := strings.TrimPrefix(c.Request.URL.Path, "/")
 	if name != "" && fs.ValidPath(name) {
 		if f, err := distFS.Open(name); err == nil {
@@ -124,283 +201,4 @@ func (s *Server) spaFallback(c *gin.Context) {
 		}
 	}
 	s.serveIndex(c)
-}
-
-func parseConfigRequest(raw []byte) (domain.ConfigRequest, error) {
-	var req domain.ConfigRequest
-	if err := json.Unmarshal(raw, &req); err == nil {
-		return req, nil
-	}
-
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal(raw, &rawMap); err != nil {
-		return req, err
-	}
-
-	if v, ok := rawMap["port"]; ok {
-		switch t := v.(type) {
-		case string:
-			if n, err := strconv.Atoi(t); err == nil {
-				req.Port = n
-			}
-		case float64:
-			req.Port = int(t)
-		}
-	}
-	if v, ok := rawMap["replicas"]; ok {
-		switch t := v.(type) {
-		case string:
-			if n, err := strconv.Atoi(t); err == nil {
-				req.Replicas = n
-			}
-		case float64:
-			req.Replicas = int(t)
-		}
-	}
-
-	if v, ok := rawMap["type"].(string); ok {
-		req.Type = v
-	}
-	if v, ok := rawMap["app_name"].(string); ok {
-		req.AppName = v
-	}
-	if v, ok := rawMap["image"].(string); ok {
-		req.Image = v
-	}
-	if v, ok := rawMap["tag"].(string); ok {
-		req.Tag = v
-	}
-	if v, ok := rawMap["k8s_resource"]; ok {
-		switch t := v.(type) {
-		case string:
-			if t != "" {
-				req.K8sResource = []string{t}
-			}
-		case []interface{}:
-			resources := make([]string, len(t))
-			for i, item := range t {
-				if s, ok := item.(string); ok {
-					resources[i] = s
-				}
-			}
-			req.K8sResource = resources
-		}
-	}
-	if v, ok := rawMap["env"].(map[string]interface{}); ok {
-		env := map[string]string{}
-		for k, val := range v {
-			if vs, ok := val.(string); ok {
-				env[k] = vs
-			}
-		}
-		req.Env = env
-	}
-
-	return req, nil
-}
-
-func (s *Server) generateCompose(c *gin.Context) {
-	s.generateWithTypeInternal(c, "compose")
-}
-
-func (s *Server) generateK8s(c *gin.Context) {
-	s.generateWithTypeInternal(c, "k8s")
-}
-
-func (s *Server) generateWithType(c *gin.Context) {
-	configType := c.Param("type")
-	s.generateWithTypeInternal(c, configType)
-}
-
-func (s *Server) generate(c *gin.Context) {
-	req, ok := parseGenerateBody(c)
-	if !ok {
-		return
-	}
-
-	if req.Type == "" {
-		req.Type = "k8s"
-	}
-
-	s.processGenerateRequest(c, req)
-}
-
-func (s *Server) generateWithTypeInternal(c *gin.Context, configType string) {
-	req, ok := parseGenerateBody(c)
-	if !ok {
-		return
-	}
-
-	req.Type = configType
-
-	s.processGenerateRequest(c, req)
-}
-
-// parseGenerateBody reads and parses the JSON request body,
-// writing a 400 response and returning false on failure.
-func parseGenerateBody(c *gin.Context) (domain.ConfigRequest, bool) {
-	rawBody, err := c.GetRawData()
-	if err != nil {
-		log.WithError(err).Warn("Failed to read request body")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
-		return domain.ConfigRequest{}, false
-	}
-
-	req, err := parseConfigRequest(rawBody)
-	if err != nil {
-		log.WithError(err).Warn("Failed to parse request JSON")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format", "details": err.Error()})
-		return domain.ConfigRequest{}, false
-	}
-
-	return req, true
-}
-
-func (s *Server) processGenerateRequest(c *gin.Context, req domain.ConfigRequest) {
-	s.configGen.Prepare(&req)
-
-	if err := validate.Struct(req); err != nil {
-		log.WithError(err).WithField("request", req).Warn("Validation failed")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation failed", "details": err.Error()})
-		return
-	}
-
-	log.WithFields(logrus.Fields{
-		"type":    req.Type,
-		"appName": req.AppName,
-	}).Info("Generating config")
-
-	rec, err := s.configGen.GenerateAndSave(req)
-	if err != nil {
-		log.WithError(err).Error("Failed to generate config")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate configuration"})
-		return
-	}
-
-	log.WithField("id", rec.ID).Info("Config generated and saved")
-	c.JSON(http.StatusCreated, rec)
-}
-
-func (s *Server) getConfig(c *gin.Context) {
-	id, err := parseID(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
-		return
-	}
-
-	rec, err := s.configGen.GetRecord(id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		log.WithError(err).Error("Failed to get config record")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
-		return
-	}
-
-	c.JSON(http.StatusOK, rec)
-}
-
-func (s *Server) getConfigResources(c *gin.Context) {
-	id, err := parseID(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
-		return
-	}
-
-	rec, err := s.configGen.GetRecord(id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		log.WithError(err).Error("Failed to get config record")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
-		return
-	}
-
-	if rec.Result.Resources == nil {
-		rec.Result.Resources = []domain.ResourceNode{}
-	}
-	c.JSON(http.StatusOK, rec.Result.Resources)
-}
-
-func (s *Server) getConfigEdges(c *gin.Context) {
-	id, err := parseID(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
-		return
-	}
-
-	rec, err := s.configGen.GetRecord(id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		log.WithError(err).Error("Failed to get config record")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
-		return
-	}
-
-	if rec.Result.Edges == nil {
-		rec.Result.Edges = []domain.ResourceEdge{}
-	}
-	c.JSON(http.StatusOK, rec.Result.Edges)
-}
-
-func (s *Server) getConfigGraph(c *gin.Context) {
-	id, err := parseID(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be integer"})
-		return
-	}
-
-	rec, err := s.configGen.GetRecord(id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		log.WithError(err).Error("Failed to get config record")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve configuration"})
-		return
-	}
-
-	if rec.Result.Resources == nil {
-		rec.Result.Resources = []domain.ResourceNode{}
-	}
-	if rec.Result.Edges == nil {
-		rec.Result.Edges = []domain.ResourceEdge{}
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"resources": rec.Result.Resources,
-		"edges":     rec.Result.Edges,
-	})
-}
-
-func (s *Server) listConfigs(c *gin.Context) {
-	offsetStr := c.DefaultQuery("offset", "0")
-	limitStr := c.DefaultQuery("limit", "20")
-
-	offset, err := strconv.Atoi(offsetStr)
-	if err != nil || offset < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid offset"})
-		return
-	}
-
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 || limit > 100 {
-		limit = 20
-	}
-
-	records, err := s.configGen.ListRecords(offset, limit)
-	if err != nil {
-		log.WithError(err).Error("Failed to list configs")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list configurations"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"records": records, "offset": offset, "limit": limit})
 }

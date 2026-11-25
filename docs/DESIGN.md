@@ -1,160 +1,177 @@
-# ConfigGen 设计文档
+# ConfigGen 设计总览与维护规范
 
-> 本文档描述 ConfigGen 的整体架构与前端设计。功能清单与 API 用法以 `README.md` 为准,本文不重复罗列。
+> 本文是项目设计文档的入口，负责跨前后端的架构、决策与维护流程。
+> 后端实现细节见 [BACKEND.md](BACKEND.md)，前端实现细节见 [FRONTEND.md](FRONTEND.md)。
 
-## 1. 系统概览
+## 1. 目标与非目标
 
-ConfigGen 是一个云原生配置生成工具:用户通过 Web 界面或 REST API 提交参数,后端基于模板生成 Docker Compose / Kubernetes / Dockerfile / Kustomize 配置,记录持久化到 SQLite,并为 K8s 资源推导拓扑关系图。
+### 目标
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    浏览器                             │
-│  Vue 3 SPA(Naive UI / Pinia / Vue Router)          │
-└──────────────────────┬──────────────────────────────┘
-                       │ HTTP / JSON
-┌──────────────────────▼──────────────────────────────┐
-│              presentation(Gin)                      │
-│  REST API(/api/v1/*)+ SPA 静态服务与路由回退        │
-├─────────────────────────────────────────────────────┤
-│              usecase(业务逻辑)                      │
-│  Prepare 默认值 → GenerateAndSave → 查询             │
-├─────────────────────────────────────────────────────┤
-│              domain(实体与接口)                     │
-├─────────────────────────────────────────────────────┤
-│   infrastructure               │ infrastructure      │
-│   generators(注册表 + 模板)   │ storage(SQLite)   │
-└─────────────────────────────────────────────────────┘
-```
+1. 在 Web 页面选择 Kubernetes 资源，自动处理资源之间的依赖，输出可直接 kubectl apply 的多文件 YAML。
+2. 依赖、命名、引用、排序、校验全部由后端负责，前端只做输入与展示。
+3. 生成物可复现、可解释、可追溯（历史快照含目录版本）。
+4. 单二进制分发：前端构建产物与全部逻辑内嵌，无 cgo、无外部中间件。
 
-依赖方向: `presentation → usecase → domain ← infrastructure`,前端通过 REST API 与后端解耦。
+### 非目标（当前版本）
 
-## 2. 前端架构
+- 不做 Helm Chart 生成 / 发布生命周期管理。
+- 不做多租户、鉴权、配额中心。
+- 不做服务端 dry-run、集群连接、GitOps 推送。
+- 不做资源模板热加载、外部插件、i18n。
 
-### 2.1 技术栈
+## 2. 文档地图
 
-| 技术 | 职责 |
-|------|------|
-| Vue 3(Composition API + `<script setup>`) | 视图层 |
-| Vite 7 | 开发服务器与生产构建 |
-| TypeScript | 类型约束(编辑器支持,构建不做类型阻塞) |
-| Pinia | 状态管理(生成器表单、历史记录) |
-| Vue Router 4(history 模式) | SPA 路由 |
-| Naive UI | 组件库,通过 `n-config-provider` 定制主题 |
-| vis-network | K8s 资源拓扑图渲染 |
+| 文档 | 内容 | 读者 |
+| --- | --- | --- |
+| docs/DESIGN.md（本文） | 架构、数据流、决策记录、维护流程、验收标准 | 所有人 |
+| docs/BACKEND.md | 分层、领域模型、目录、解析算法、builder、API、存储、测试、扩展 | 后端开发/维护 |
+| docs/FRONTEND.md | 技术栈、数据契约、store、组件、交互、样式、构建、开发规范 | 前端开发/维护 |
+| README.md | 使用说明、API 示例、快速开始、已知限制 | 使用者 |
+| AGENTS.md | 仓库导航、命令、不可破坏的约定 | 后续 AI/开发者 |
 
-### 2.2 目录结构
+文档同步规则：**任何影响架构、API 契约、资源目录、默认值、构建方式或前端交互的改动，必须在同一个变更中更新对应文档。** 只改代码不改文档视为未完成。
 
-```
-web/
-├── embed.go              # //go:embed all:dist,构建产物嵌入二进制
-├── package.json          # 前端依赖与脚本
-├── vite.config.ts        # Vite 配置(@ 别名、/api 开发代理)
-├── tsconfig.json
-├── index.html            # Vite 入口(内联 SVG favicon)
-├── src/
-│   ├── main.ts           # 应用装配:Pinia + Router
-│   ├── App.vue           # 主题注入 + 布局(页头/导航/内容)
-│   ├── theme.ts          # Naive UI 主题令牌(#7DAEE1 主色体系)
-│   ├── router/index.ts   # 路由表
-│   ├── api/              # 类型定义(types.ts)+ fetch 封装(client.ts)
-│   ├── stores/           # Pinia:generator(表单与结果)、history(记录列表)
-│   ├── constants/k8s.ts  # 20 种资源类型、节点配色、类型展示元信息
-│   ├── components/       # EnvVarEditor / ResourcePicker / ResultPanel / ResourceGraph
-│   ├── views/            # GeneratorView / HistoryView / RecordDetailView
-│   └── styles/main.css   # 全局样式与设计令牌(CSS 变量)
-└── dist/                 # Vite 构建产物(提交进仓库,供纯 Go 构建使用)
-```
+## 3. 系统架构
 
-### 2.3 路由设计
+~~~
+┌──────────────────────────────────────────────────────────┐
+│ 浏览器：Vue 3 SPA（Pinia / Naive UI / vis-network）       │
+└───────────────┬──────────────────────────────────────────┘
+                │ JSON（snake_case，严格字段）
+┌───────────────▼──────────────────────────────────────────┐
+│ presentation（Gin）                                       │
+│ 路由 / 严格解码 / 错误映射 / SPA 静态服务                 │
+├──────────────────────────────────────────────────────────┤
+│ usecase：Plan / Render / Record 查询 / Health             │
+├──────────────────────────────────────────────────────────┤
+│ domain：实体 + Catalog + Resolve + Validate + Store 接口  │
+├──────────────────────────────────────────────────────────┤
+│ infrastructure                                            │
+│  builders（k8s.io/api） / render / storage（SQLite）      │
+└──────────────────────────────────────────────────────────┘
+~~~
 
-| 路径 | 页面 | 说明 |
-|------|------|------|
-| `/` | GeneratorView | 配置表单 + 生成结果 + 拓扑图(主页) |
-| `/history` | HistoryView | 生成记录列表(服务端分页) |
-| `/history/:id` | RecordDetailView | 记录详情:请求参数、结果、拓扑图 |
-| `*` | 重定向 `/` | 兜底 |
+依赖方向：presentation → usecase → domain ← infrastructure。domain 不依赖任何框架或外部 IO。
 
-Vue Router 使用 history 模式,后端 `spaFallback` 对未匹配路径回退到 `index.html`(见 §4)。
+## 4. 运行时数据流
 
-### 2.4 状态管理
+~~~
+Selection（type + app + resources）
+   │ domain.Resolve：纯函数，无 IO
+   ▼
+Plan（nodes / edges / diagnostics / valid）
+   │ render.Render：builder 构造对象 + YAML 序列化 + 产物校验
+   ▼
+[]Artifact + bundle
+   │ usecase.Render
+   ▼
+Record（Selection + Plan + Files + CatalogVersion）──► SQLite 快照
+~~~
 
-- **generator store**:四种配置类型共用的表单字段;`k8s` 与 `kustomize` 各自维护独立的资源勾选集合(与旧版行为一致);`buildPayload()` 负责与后端请求结构对齐 —— 环境变量仅在非空时发送,`replicas` 仅在勾选工作负载资源时发送,dockerfile 附加字段按需携带。生成结果保存在 `lastRecord`。
-- **history store**:记录列表与服务端分页。后端 `/configs` 不返回总数,采用「多取一条」策略判断是否有下一页。
+前端有两条调用：
 
-### 2.5 API 层约定
+- 输入变化（300ms 防抖）→ POST /api/v1/plan → 只预览依赖与诊断。
+- 点击生成 → POST /api/v1/render → 返回并持久化完整记录。
 
-`src/api/client.ts` 统一封装 fetch:非 2xx 响应抛出携带 `error`/`details` 的 Error,由页面以 Naive UI message 呈现。类型定义 `types.ts` 与后端 `internal/domain/types.go` 的 JSON 字段一一对应(snake_case)。
+## 5. 仓库结构
 
-## 3. 视觉设计
+~~~
+cmd/configgen/            进程入口、DI、HTTP Server、优雅停机
+config/                   .env 与监听地址
+internal/domain/          唯一事实源（catalog/resolve/validate/types）
+internal/usecase/         业务入口
+internal/infrastructure/  builders / render / storage
+internal/presentation/    Gin 路由与 SPA
+web/src/                  Vue 源码
+web/dist/                 构建产物（提交、嵌入）
+docs/                     本组文档
+~~~
 
-### 3.1 设计原则
+## 6. 跨层约定
 
-贴合「云原生配置生成器」的开发者工具定位:
+### 6.1 命名
 
-- **克制干净**:浅色底 + 白色卡片,信息层级靠留白与字重而非重装饰;
-- **主色克制使用**:主色 #7DAEE1 用于交互态(按钮、选中、链接)而非大面积铺色;
-- **技术感细节**:配置输出用等宽字体展示、拓扑图保留资源分类配色、页面右上角品牌 Logo 为 `{}` 字形渐变方块;
-- **中文界面**,组件文案与后端提示保持一致的中文语气。
+- 资源名 = appName + "-" + catalog.Suffix，唯一且符合 DNS-1123。
+- 引用只能是 Node.Refs 中的 (Kind, Name)，禁止在 builder 中拼名字。
+- JSON 字段统一 snake_case；前端类型与后端结构一一对应。
 
-### 3.2 色彩令牌
+### 6.2 错误
 
-| 令牌 | 值 | 用途 |
-|------|----|------|
-| 主色 | `#7DAEE1` | 品牌色、主按钮、选中态 |
-| 主色 Hover | `#93BEE8` | 悬停 |
-| 主色 Pressed | `#6698CF` | 按下 |
-| 页面背景 | `#F5F8FC` | body / 布局底色 |
-| 卡片背景 | `#FFFFFF` | 卡片、弹层 |
-| 边框 | `#DFE9F5` | 输入框、分割线 |
-| 主文本 | `#2C3E5D` | 标题 |
-| 次级文本 | `#44557A` / `#8296B3` | 正文 / 辅助说明 |
-| 代码块背景 | `#F7FAFD` | 配置输出 |
+- 输入/参数错误：400，响应含 diagnostics。
+- 依赖冲突（HPA 多目标等）：422。
+- 内部错误：500，不泄露内部细节。
+- 错误分类由 domain.AppError 承载，presentation 只做映射。
 
-主题通过 `src/theme.ts` 注入 Naive UI `GlobalThemeOverrides`,并在 `main.css` 中以 CSS 变量(`--cg-*`)同步一份供自定义样式使用。拓扑图节点按资源分类使用柔和色系(`constants/k8s.ts` 的 `KIND_COLORS`),描边统一使用主色系 `#6E9CD3`。
+### 6.3 确定性
 
-## 4. 构建与部署
+- 节点按 (Level, Kind, Name) 排序；环境变量、端口按固定规则排序。
+- 同一 Selection 两次渲染必须字节一致；bundle 与 files 内容一致。
+- 目录版本 CatalogVersion 在资源目录语义变化时递增，并随记录保存。
 
-### 4.1 生产构建(单二进制)
+### 6.4 安全与输入
 
-```
-cd web && npm install && npm run build   # 产出 web/dist
-go build -o configgen ./cmd/configgen    # dist 经 go:embed 嵌入
-```
+- 请求体 1 MiB 上限；未知字段拒绝。
+- 名称/端口/环境变量在 domain 校验，禁止把用户输入直接拼进 YAML 结构（使用类型化对象）。
+- 生成的 Secret 不含默认口令；无内容时显式告警。
 
-`web/dist` 提交进仓库,保证在没有 Node 环境的机器上也能纯 Go 构建(仓库中的 dist 若为占位页,则构建后提示执行 npm 构建)。`web/node_modules` 不入库。
+## 7. 设计决策记录（ADR）
 
-### 4.2 前后端联调
+| 编号 | 决策 | 原因 | 代价/约束 |
+| --- | --- | --- | --- |
+| ADR-1 | Plan 与 Render 分离，Resolve 为纯函数 | 依赖可单测、可预览、前端可复用；避免 builder 内推导 | 需要维护 Plan 中间模型与 Ref 绑定 |
+| ADR-2 | 用 k8s.io/api 类型化对象替代 text/template | 编译期字段正确、YAML 由序列化器保证、无注入面 | 依赖体积较大；默认值需在 builder 显式设置 |
+| ADR-3 | Catalog 作为单一事实源 | 校验/命名/默认值/关系/前端目录只维护一处 | 新增资源必须同时写 builder 与测试 |
+| ADR-4 | SQLite 使用 modernc.org/sqlite（纯 Go） | 去掉 cgo 后 Docker/Release 可启动、可交叉编译 | 二进制略大；驱动行为需按 _pragma 配置 |
+| ADR-5 | 前端 dist 提交并 go:embed | 纯 Go 构建无需 Node，单文件分发 | dist 可能过期，必须手动/CI 校验 |
+| ADR-6 | 严格 JSON + 400/422/500 分类 | 客户端错误不再变成 500；契约稳定 | 前端字段必须与后端严格同步 |
+| ADR-7 | 移除 Sentry/logrus/validator 死依赖 | 减少无用依赖与虚假能力声明；slog 统一日志 | 若未来需要错误追踪需重新接入中间件 |
 
-```
-终端 1:go run ./cmd/configgen           # 后端 :8080
-终端 2:cd web && npm run dev            # Vite :5173,/api 代理到 :8080
-```
+## 8. 维护流程
 
-访问 http://localhost:5173 进行开发,享受热更新;后端 API 与生产环境完全一致。
+### 8.1 变更前
 
-### 4.3 SPA 服务(Go 端)
+1. 判断是否触及：资源目录、解析规则、API 契约、默认值、构建方式、前端交互。
+2. 触及则先更新对应文档的“设计”部分，再改代码。
+3. 新资源先加 catalog 与测试，再加 builder。
 
-`presentation/server.go` 的 `spaFallback` 处理所有未匹配路由:
+### 8.2 变更中
 
-1. `/api/*` 未匹配 → JSON 404(不返回 SPA 文档);
-2. 命中 `dist` 内的静态文件(如 `/assets/*.js`)→ 直接返回文件(带 MIME 与协商缓存);
-3. 其余路径 → 返回 `index.html`,由 Vue Router 接管(客户端路由刷新可用)。
+- 后端：保持 domain 纯函数；所有跨资源引用走 Ref；渲染后校验。
+- 前端：不复制业务规则；类型与后端同步；保持 loading/empty/error 三态。
+- 文档：代码与文档同一个变更提交。
 
-`web/embed.go` 使用 `//go:embed all:dist` 嵌入整个构建产物;`embed.FS` 经 `io/fs.Sub` 得到 `dist` 子树供静态服务使用。
+### 8.3 变更后（提交前门禁）
 
-## 5. 关键数据流
+~~~
+gofmt -l cmd config internal     # 必须为空
+go vet ./...                     # 必须通过
+go test ./...                    # 必须全绿
+go test -cover ./...             # 关注 domain/render 覆盖率
+cd web && npm run build          # 必须更新 dist
+CGO_ENABLED=0 go build ./cmd/configgen
+~~~
 
-```
-表单提交 → generator store buildPayload()
-        → POST /api/v1/generate/{type}
-        → 后端 Prepare(默认值) → validate → 生成模板 → 关系抽取 → SQLite 保存
-        → 返回 ConfigRecord(id/request/result/resources/edges)
-        → ResultPanel 展示配置(复制/下载)
-        → ResourceGraph 用 result 内联的 resources/edges 渲染 vis-network
-```
+### 8.4 版本与发布
 
-历史页 `GET /api/v1/configs?offset&limit` → 表格;详情页 `GET /api/v1/configs/:id` → 描述列表 + 结果 + 拓扑图。
+- 资源目录语义变化：递增 CatalogVersion，并在文档中记录。
+- 数据库结构变化：新增表/列需给出迁移说明；当前不迁移旧表。
+- 发布：打 v* 标签，CI 产出多平台二进制与多架构镜像。
+- 破坏性 API 变更：需同步前端与 README，并在本文记录决策。
 
-## 6. 未实现功能(规划中)
+## 9. 全局验收标准
 
-Nginx 配置、Docker Daemon 配置、Containerd 配置、ZIP 打包下载、模板热更新、外部插件系统、i18n 多语言。详见 `AGENTS.md` 的「Not implemented」章节。
+- 选择 Ingress 时自动补齐 Service/Deployment，并给出 info 诊断。
+- 空资源列表返回 400；HPA 多目标返回 422。
+- 生成物为合法 YAML，kind/name 齐全，引用全部命中，名称符合 DNS-1123。
+- 端口、环境变量、命名空间没有“静默丢失”。
+- 历史详情可还原当时的 Plan 与文件。
+- 前端能展示自动补充、诊断、关系图、多文件与下载。
+- 构建不再依赖 cgo；Docker 镜像可启动。
+
+## 10. 路线图
+
+1. 生成物二次校验：kubeconform / kubectl --dry-run=server（可选连接集群）。
+2. 参数化脚手架：StorageClass provisioner、IngressClass controller、CronJob schedule、PVC 容量、Secret 内容。
+3. 导出能力：Helm values.yaml、ZIP 多文件包。
+4. 工程化：前端单测 + E2E、CI 校验 dist 新鲜度、gosec 阻断策略。
+5. 运维能力：鉴权、审计、记录搜索与清理策略。

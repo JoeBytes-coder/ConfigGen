@@ -1,178 +1,79 @@
 package storage
 
 import (
-	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"configgen/internal/domain"
 )
 
-func TestSQLiteStore_SaveAndFind(t *testing.T) {
-	dbPath := "test_configgen.db"
-	defer os.Remove(dbPath)
+func newRecord(name string) domain.Record {
+	return domain.Record{
+		Type: domain.TypeK8s,
+		App:  domain.AppContext{Name: name, Namespace: "prod"},
+		Selection: domain.Selection{
+			Type: domain.TypeK8s, App: domain.AppContext{Name: name}, Resources: []string{"Deployment"},
+		},
+		Plan: domain.Plan{
+			Type: domain.TypeK8s, App: domain.AppContext{Name: name},
+			Nodes: []domain.Node{{Kind: "Deployment", Name: name + "-deployment", Level: 2}},
+		},
+		Files:          []domain.Artifact{{Path: "deployment.yaml", Kind: "Deployment", Content: "kind: Deployment\n"}},
+		Bundle:         "---\nkind: Deployment\n",
+		CatalogVersion: domain.CatalogVersion,
+		CreatedAt:      time.Now().UTC().Truncate(time.Second),
+	}
+}
 
-	store, err := NewSQLiteStore(dbPath)
+func TestSQLiteStoreCRUD(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
 
-	rec := domain.ConfigRecord{
-		Request: domain.ConfigRequest{
-			Type:    "compose",
-			AppName: "test-app",
-			Image:   "nginx",
-			Tag:     "latest",
-			Port:    80,
-		},
-		Result: domain.ConfigResult{
-			Type:   "compose",
-			Config: "version: \"3.8\"\nservices:\n  test-app:\n    image: nginx:latest",
-		},
-		CreatedAt: time.Now().UTC().Truncate(time.Second),
-	}
-
-	id, err := store.Save(rec)
+	id, err := store.Save(newRecord("demo"))
 	if err != nil {
-		t.Fatalf("failed to save record: %v", err)
+		t.Fatalf("save: %v", err)
 	}
 	if id <= 0 {
-		t.Errorf("expected positive ID, got %d", id)
+		t.Errorf("expected positive id, got %d", id)
 	}
 
 	found, err := store.Find(id)
 	if err != nil {
-		t.Fatalf("failed to find record: %v", err)
+		t.Fatalf("find: %v", err)
+	}
+	if found.App.Name != "demo" || found.Type != domain.TypeK8s {
+		t.Errorf("unexpected record: %+v", found)
+	}
+	if len(found.Files) != 1 || found.Files[0].Path != "deployment.yaml" {
+		t.Errorf("files not round-tripped: %+v", found.Files)
+	}
+	if found.CreatedAt.IsZero() {
+		t.Error("created_at not parsed")
 	}
 
-	if found.ID != id {
-		t.Errorf("expected ID %d, got %d", id, found.ID)
+	if _, err := store.Save(newRecord("second")); err != nil {
+		t.Fatalf("save second: %v", err)
 	}
-	if found.Request.Type != "compose" {
-		t.Errorf("expected compose type, got %s", found.Request.Type)
+	count, err := store.Count()
+	if err != nil || count != 2 {
+		t.Fatalf("expected count 2, got %d err %v", count, err)
 	}
-	if found.Request.AppName != "test-app" {
-		t.Errorf("expected app name test-app, got %s", found.Request.AppName)
-	}
-	if found.Result.Config != rec.Result.Config {
-		t.Errorf("config mismatch")
-	}
-}
 
-func TestSQLiteStore_FindNotFound(t *testing.T) {
-	dbPath := "test_notfound.db"
-	defer os.Remove(dbPath)
-
-	store, err := NewSQLiteStore(dbPath)
+	list, err := store.List(0, 10)
 	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
+		t.Fatalf("list: %v", err)
 	}
-	defer store.Close()
-
-	_, err = store.Find(999)
-	if err == nil {
-		t.Fatal("expected error for non-existent record")
+	if len(list) != 2 || list[0].AppName != "second" {
+		t.Errorf("unexpected list: %+v", list)
 	}
-}
-
-func TestSQLiteStore_CreateTableIfNotExists(t *testing.T) {
-	dbPath := "test_new.db"
-	defer os.Remove(dbPath)
-
-	store1, err := NewSQLiteStore(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
+	if len(list[0].Kinds) != 1 || list[0].Kinds[0] != "Deployment" {
+		t.Errorf("expected kinds projection, got %+v", list[0].Kinds)
 	}
-	store1.Close()
-
-	store2, err := NewSQLiteStore(dbPath)
-	if err != nil {
-		t.Fatalf("failed to reopen store: %v", err)
-	}
-	defer store2.Close()
-
-	rec := domain.ConfigRecord{
-		Request: domain.ConfigRequest{
-			Type:    "dockerfile",
-			AppName: "reopen-test",
-			Image:   "alpine",
-			Tag:     "3.18",
-			Port:    80,
-		},
-		Result: domain.ConfigResult{
-			Type:   "dockerfile",
-			Config: "FROM alpine:3.18",
-		},
-		CreatedAt: time.Now().UTC(),
-	}
-
-	id, err := store2.Save(rec)
-	if err != nil {
-		t.Fatalf("failed to save after reopen: %v", err)
-	}
-	if id <= 0 {
-		t.Errorf("expected positive ID, got %d", id)
-	}
-}
-
-func TestSQLiteStore_List(t *testing.T) {
-	dbPath := "test_list.db"
-	defer os.Remove(dbPath)
-
-	store, err := NewSQLiteStore(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	defer store.Close()
-
-	records, err := store.List(0, 10)
-	if err != nil {
-		t.Fatalf("failed to list empty store: %v", err)
-	}
-	if len(records) != 0 {
-		t.Errorf("expected 0 records, got %d", len(records))
-	}
-
-	for i := 0; i < 3; i++ {
-		rec := domain.ConfigRecord{
-			Request: domain.ConfigRequest{
-				Type:    "compose",
-				AppName: "app-" + string(rune('A'+i)),
-				Image:   "nginx",
-				Tag:     "latest",
-				Port:    80,
-			},
-			Result: domain.ConfigResult{
-				Type:   "compose",
-				Config: "test-config",
-			},
-			CreatedAt: time.Now().UTC(),
-		}
-		store.Save(rec)
-	}
-
-	records, err = store.List(0, 10)
-	if err != nil {
-		t.Fatalf("failed to list records: %v", err)
-	}
-	if len(records) != 3 {
-		t.Errorf("expected 3 records, got %d", len(records))
-	}
-
-	records, err = store.List(0, 2)
-	if err != nil {
-		t.Fatalf("failed to list with limit: %v", err)
-	}
-	if len(records) != 2 {
-		t.Errorf("expected 2 records, got %d", len(records))
-	}
-
-	records, err = store.List(2, 2)
-	if err != nil {
-		t.Fatalf("failed to list with offset: %v", err)
-	}
-	if len(records) != 1 {
-		t.Errorf("expected 1 record past offset, got %d", len(records))
+	if err := store.Ping(); err != nil {
+		t.Errorf("ping: %v", err)
 	}
 }

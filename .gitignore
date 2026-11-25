@@ -7,6 +7,9 @@
 *.test
 *.out
 
+# Local scratch (module cache / build output)
+.tmp/
+
 # SQLite
 *.db
 db/

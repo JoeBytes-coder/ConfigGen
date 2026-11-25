@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -13,9 +13,15 @@ import {
 } from 'naive-ui'
 
 import { themeOverrides } from '@/theme'
+import { useMetaStore } from '@/stores/meta'
 
 const route = useRoute()
 const activeKey = computed(() => (route.path.startsWith('/history') ? 'history' : 'generator'))
+
+// 应用挂载时拉取 K8s 资源目录(选择器分组/拓扑配色/replicas 门控依赖它)
+onMounted(() => {
+  useMetaStore().fetchMeta()
+})
 </script>
 
 <template>

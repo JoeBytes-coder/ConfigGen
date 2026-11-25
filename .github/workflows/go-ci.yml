@@ -47,7 +47,7 @@ jobs:
         run: go test -v ./...
 
       - name: Build binary (optional)
-        run: go build -o configgen ./cmd/configgen
+        run: CGO_ENABLED=0 go build -trimpath -o configgen ./cmd/configgen
 
       - name: Smoke test binary help
         run: ./configgen -h

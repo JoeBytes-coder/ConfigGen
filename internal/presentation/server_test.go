@@ -10,389 +10,176 @@ import (
 	"testing"
 	"time"
 
-	"configgen/internal/domain"
-
 	"github.com/gin-gonic/gin"
+
+	"configgen/internal/domain"
 )
 
-type mockConfigGenerator struct {
-	prepareFunc       func(*domain.ConfigRequest)
-	generateAndSaveFn func(domain.ConfigRequest) (domain.ConfigRecord, error)
-	getRecordFn       func(int64) (domain.ConfigRecord, error)
-	listRecordsFn     func(int, int) ([]domain.ConfigRecord, error)
+type mockUseCase struct {
+	planFn   func(domain.Selection) (domain.Plan, error)
+	renderFn func(domain.Selection) (domain.Record, error)
+	getFn    func(int64) (domain.Record, error)
+	listFn   func(int, int) ([]domain.RecordSummary, int, error)
+	healthFn func() error
 }
 
-func (m *mockConfigGenerator) Prepare(req *domain.ConfigRequest) {
-	if m.prepareFunc != nil {
-		m.prepareFunc(req)
-	}
+func (m *mockUseCase) Plan(sel domain.Selection) (domain.Plan, error) { return m.planFn(sel) }
+func (m *mockUseCase) Render(sel domain.Selection) (domain.Record, error) {
+	return m.renderFn(sel)
 }
-
-func (m *mockConfigGenerator) GenerateAndSave(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-	return m.generateAndSaveFn(req)
+func (m *mockUseCase) GetRecord(id int64) (domain.Record, error) { return m.getFn(id) }
+func (m *mockUseCase) ListRecords(offset, limit int) ([]domain.RecordSummary, int, error) {
+	return m.listFn(offset, limit)
 }
+func (m *mockUseCase) Health() error { return m.healthFn() }
 
-func (m *mockConfigGenerator) GetRecord(id int64) (domain.ConfigRecord, error) {
-	return m.getRecordFn(id)
-}
+func init() { gin.SetMode(gin.TestMode) }
 
-func (m *mockConfigGenerator) ListRecords(offset, limit int) ([]domain.ConfigRecord, error) {
-	return m.listRecordsFn(offset, limit)
-}
+func newTestRouter(m *mockUseCase) *gin.Engine { return NewServer(m).router }
 
-// matchUsecaseInterface ensures mockConfigGenerator satisfies the interface.
-var _ = &mockConfigGenerator{}
-
-func init() {
-	gin.SetMode(gin.TestMode)
-}
-
-func newTestServer(mock *mockConfigGenerator) *Server {
-	g := gin.New()
-	s := &Server{router: g, configGen: mock}
-
-	g.GET("/health", s.health)
-	g.POST("/api/v1/generate", s.generate)
-	g.POST("/api/v1/generate/:type", s.generateWithType)
-	g.POST("/api/v1/generate/compose", s.generateCompose)
-	g.POST("/api/v1/generate/k8s", s.generateK8s)
-	g.GET("/api/v1/configs", s.listConfigs)
-	g.GET("/api/v1/configs/:id", s.getConfig)
-	g.GET("/api/v1/configs/:id/resources", s.getConfigResources)
-	g.GET("/api/v1/configs/:id/edges", s.getConfigEdges)
-	g.GET("/api/v1/configs/:id/graph", s.getConfigGraph)
-
-	return s
-}
-
-func TestHealth(t *testing.T) {
-	s := newTestServer(&mockConfigGenerator{})
+func do(router *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/health", nil)
-	s.router.ServeHTTP(w, req)
+	req, _ := http.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestCatalogAndHealth(t *testing.T) {
+	router := newTestRouter(&mockUseCase{healthFn: func() error { return nil }})
+
+	w := do(router, "GET", "/api/v1/catalog", "")
 	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+		t.Fatalf("catalog status %d", w.Code)
 	}
-	var body map[string]string
-	json.Unmarshal(w.Body.Bytes(), &body)
-	if body["status"] != "ok" {
-		t.Errorf("expected status ok, got %s", body["status"])
+	var catalog domain.CatalogPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestGenerate(t *testing.T) {
-	t.Run("valid compose request returns 201", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-			generateAndSaveFn: func(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-				return domain.ConfigRecord{
-					ID: 1,
-					Request: domain.ConfigRequest{
-						Type: "compose", AppName: "test", Image: "n", Tag: "l", Port: 80,
-					},
-					Result:    domain.ConfigResult{Type: "compose", Config: "version: '3'"},
-					CreatedAt: time.Now(),
-				}, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"type":"compose","app_name":"test","image":"n","tag":"l","port":80}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusCreated {
-			t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
-		}
-		var rec domain.ConfigRecord
-		if err := json.Unmarshal(w.Body.Bytes(), &rec); err != nil {
-			t.Fatalf("failed to parse response: %v", err)
-		}
-		if rec.ID != 1 {
-			t.Errorf("expected id 1, got %d", rec.ID)
-		}
-	})
-
-	t.Run("missing type defaults to k8s", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-			generateAndSaveFn: func(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-				if req.Type != "k8s" {
-					t.Errorf("expected type k8s, got %s", req.Type)
-				}
-				return domain.ConfigRecord{ID: 2}, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"app_name":"test","image":"n","tag":"l","port":80}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusCreated {
-			t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("validation error returns 400", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"type":"compose","app_name":"","image":"","tag":"","port":0}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("generator error returns 500", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-			generateAndSaveFn: func(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-				return domain.ConfigRecord{}, errors.New("gen failed")
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"type":"compose","app_name":"test","image":"n","tag":"l","port":80}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusInternalServerError {
-			t.Errorf("expected 500, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("invalid JSON body returns 400", func(t *testing.T) {
-		mock := &mockConfigGenerator{}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `not json`
-		req, _ := http.NewRequest("POST", "/api/v1/generate", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-}
-
-func TestGenerateWithType(t *testing.T) {
-	t.Run("compose endpoint forces type", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-			generateAndSaveFn: func(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-				if req.Type != "compose" {
-					t.Errorf("expected type compose, got %s", req.Type)
-				}
-				return domain.ConfigRecord{ID: 3}, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"app_name":"test","image":"n","tag":"l","port":80}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate/compose", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusCreated {
-			t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("url param type is used", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			prepareFunc: func(req *domain.ConfigRequest) {},
-			generateAndSaveFn: func(req domain.ConfigRequest) (domain.ConfigRecord, error) {
-				if req.Type != "dockerfile" {
-					t.Errorf("expected type dockerfile, got %s", req.Type)
-				}
-				return domain.ConfigRecord{ID: 4}, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		body := `{"app_name":"test","image":"n","tag":"l","port":80}`
-		req, _ := http.NewRequest("POST", "/api/v1/generate/dockerfile", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusCreated {
-			t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-}
-
-func TestGetConfig(t *testing.T) {
-	t.Run("found returns record", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			getRecordFn: func(id int64) (domain.ConfigRecord, error) {
-				return domain.ConfigRecord{ID: id, CreatedAt: time.Now()}, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/1", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("not found returns 404", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			getRecordFn: func(id int64) (domain.ConfigRecord, error) {
-				return domain.ConfigRecord{}, sql.ErrNoRows
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/99", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("invalid id returns 400", func(t *testing.T) {
-		mock := &mockConfigGenerator{}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/abc", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-}
-
-func TestListConfigs(t *testing.T) {
-	mock := &mockConfigGenerator{
-		listRecordsFn: func(offset, limit int) ([]domain.ConfigRecord, error) {
-			return []domain.ConfigRecord{}, nil
-		},
+	if len(catalog.Kinds) != len(domain.Catalog) {
+		t.Errorf("expected %d kinds, got %d", len(domain.Catalog), len(catalog.Kinds))
 	}
-	s := newTestServer(mock)
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/configs", nil)
-	s.router.ServeHTTP(w, req)
+	if catalog.Version == "" {
+		t.Error("catalog version missing")
+	}
+
+	w = do(router, "GET", "/health", "")
 	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+		t.Errorf("health status %d", w.Code)
 	}
 }
 
-func TestGraphEndpoints(t *testing.T) {
-	rec := domain.ConfigRecord{
-		ID: 1,
-		Result: domain.ConfigResult{
-			Type: "k8s",
-			Resources: []domain.ResourceNode{
-				{Kind: "Deployment", Name: "app-deployment"},
-				{Kind: "Service", Name: "app-service"},
-			},
-			Edges: []domain.ResourceEdge{
-				{SourceKind: "Service", SourceName: "app-service", TargetKind: "Deployment", TargetName: "app-deployment", Relation: "selects"},
-			},
+func TestHealthDegraded(t *testing.T) {
+	router := newTestRouter(&mockUseCase{healthFn: func() error { return errors.New("db down") }})
+	if w := do(router, "GET", "/health", ""); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestPlanEndpoint(t *testing.T) {
+	plan := domain.Plan{
+		Type:        domain.TypeK8s,
+		App:         domain.AppContext{Name: "demo"},
+		Nodes:       []domain.Node{{Kind: "Deployment", Name: "demo-deployment", Level: 2}},
+		Diagnostics: []domain.Diagnostic{},
+		Valid:       true, CatalogVersion: domain.CatalogVersion,
+	}
+	router := newTestRouter(&mockUseCase{
+		planFn: func(sel domain.Selection) (domain.Plan, error) {
+			if sel.Type != domain.TypeK8s || sel.App.Name != "demo" {
+				t.Errorf("unexpected selection: %+v", sel)
+			}
+			return plan, nil
 		},
+	})
+	w := do(router, "POST", "/api/v1/plan", `{"type":"k8s","app":{"name":"demo"},"resources":["Deployment"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "demo-deployment") {
+		t.Error("plan response missing node")
+	}
+}
+
+func TestPlanValidationError(t *testing.T) {
+	router := newTestRouter(&mockUseCase{
+		planFn: func(domain.Selection) (domain.Plan, error) {
+			return domain.Plan{}, domain.NewBadRequest("配置校验失败",
+				domain.Diagnostic{Severity: domain.SeverityError, Code: "invalid_app_name", Message: "bad"})
+		},
+	})
+	w := do(router, "POST", "/api/v1/plan", `{"type":"k8s","app":{"name":"X"},"resources":["Deployment"]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid_app_name") {
+		t.Error("expected diagnostics in response")
+	}
+}
+
+func TestPlanConflictReturns422(t *testing.T) {
+	router := newTestRouter(&mockUseCase{
+		planFn: func(domain.Selection) (domain.Plan, error) {
+			return domain.Plan{}, domain.NewUnprocessable("资源依赖无法满足")
+		},
+	})
+	w := do(router, "POST", "/api/v1/plan", `{"type":"k8s","app":{"name":"demo"},"resources":["Deployment"]}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d", w.Code)
+	}
+}
+
+func TestRenderEndpoint(t *testing.T) {
+	rec := domain.Record{
+		ID: 7, Type: domain.TypeK8s,
+		Files:     []domain.Artifact{{Path: "deployment.yaml", Kind: "Deployment", Content: "kind: Deployment"}},
+		Bundle:    "---\nkind: Deployment\n",
 		CreatedAt: time.Now(),
 	}
-
-	t.Run("graph returns nodes and edges", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			getRecordFn: func(id int64) (domain.ConfigRecord, error) {
-				return rec, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/1/graph", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-		var body map[string]interface{}
-		json.Unmarshal(w.Body.Bytes(), &body)
-		resources, ok := body["resources"].([]interface{})
-		if !ok || len(resources) != 2 {
-			t.Errorf("expected 2 resources, got %v", body["resources"])
-		}
-		edges, ok := body["edges"].([]interface{})
-		if !ok || len(edges) != 1 {
-			t.Errorf("expected 1 edge, got %v", body["edges"])
-		}
+	router := newTestRouter(&mockUseCase{
+		renderFn: func(domain.Selection) (domain.Record, error) { return rec, nil },
 	})
-
-	t.Run("resources endpoint", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			getRecordFn: func(id int64) (domain.ConfigRecord, error) {
-				return rec, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/1/resources", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("edges endpoint", func(t *testing.T) {
-		mock := &mockConfigGenerator{
-			getRecordFn: func(id int64) (domain.ConfigRecord, error) {
-				return rec, nil
-			},
-		}
-		s := newTestServer(mock)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/configs/1/edges", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-	})
+	w := do(router, "POST", "/api/v1/render", `{"type":"k8s","app":{"name":"demo"},"resources":["Deployment"]}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "deployment.yaml") {
+		t.Error("response missing files")
+	}
 }
 
-func TestSPARouting(t *testing.T) {
-	s := NewServer(&mockConfigGenerator{})
+func TestUnknownFieldRejected(t *testing.T) {
+	router := newTestRouter(&mockUseCase{})
+	w := do(router, "POST", "/api/v1/plan", `{"type":"k8s","app":{"name":"demo"},"unexpected":true}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field, got %d", w.Code)
+	}
+}
 
-	t.Run("root serves the SPA index", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d", w.Code)
-		}
-		if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-			t.Errorf("expected text/html, got %s", ct)
-		}
+func TestListAndGetRecord(t *testing.T) {
+	router := newTestRouter(&mockUseCase{
+		listFn: func(offset, limit int) ([]domain.RecordSummary, int, error) {
+			return []domain.RecordSummary{{ID: 1, Type: domain.TypeK8s, AppName: "demo"}}, 1, nil
+		},
+		getFn: func(id int64) (domain.Record, error) {
+			if id == 404 {
+				return domain.Record{}, sql.ErrNoRows
+			}
+			return domain.Record{ID: id, Type: domain.TypeK8s}, nil
+		},
 	})
+	w := do(router, "GET", "/api/v1/records?offset=0&limit=10", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":1`) {
+		t.Errorf("list response unexpected: %d %s", w.Code, w.Body.String())
+	}
 
-	t.Run("client-side route falls back to index", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/history", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-		}
-		if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
-			t.Errorf("expected text/html, got %s", ct)
-		}
-	})
-
-	t.Run("unknown api path returns json 404", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/api/v1/nope", nil)
-		s.router.ServeHTTP(w, req)
-		if w.Code != http.StatusNotFound {
-			t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
-		}
-		var body map[string]string
-		json.Unmarshal(w.Body.Bytes(), &body)
-		if body["error"] != "not found" {
-			t.Errorf("expected error 'not found', got %v", body)
-		}
-	})
+	if w := do(router, "GET", "/api/v1/records/3", ""); w.Code != http.StatusOK {
+		t.Errorf("get expected 200, got %d", w.Code)
+	}
+	if w := do(router, "GET", "/api/v1/records/404", ""); w.Code != http.StatusNotFound {
+		t.Errorf("get expected 404, got %d", w.Code)
+	}
+	if w := do(router, "GET", "/api/v1/records/abc", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("get expected 400, got %d", w.Code)
+	}
 }
